@@ -79,6 +79,33 @@ Useful runtime overrides:
 - `--image-size <int>`
 - `--embed-dim <int>`
 - `--strict-class-check` (fail fast if val has classes missing in train)
+- `--warmup-epochs <int>`
+- `--grad-clip-norm <float>`
+- `--use-ema --ema-decay <float>`
+
+Example stronger training recipe:
+
+```powershell
+python clipdetr/train_detect.py `
+  --data-root "C:\Users\tsake\OneDrive\Desktop\full dataset\merged_dataset" `
+  --data-yaml data.yaml `
+  --train-split train `
+  --val-split valid `
+  --device cuda `
+  --image-backbone convnext_tiny `
+  --image-size 320 `
+  --embed-dim 384 `
+  --batch-size 8 `
+  --epochs 80 `
+  --lr 8e-5 `
+  --weight-decay 1e-4 `
+  --warmup-epochs 5 `
+  --grad-clip-norm 1.0 `
+  --use-ema `
+  --ema-decay 0.999 `
+  --strict-class-check `
+  --tag strong_recipe_v1
+```
 
 ## 7) Optional CLIP pretrain -> detector init
 

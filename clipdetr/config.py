@@ -66,6 +66,11 @@ class Config:
     experiments_root: str = "experiments"
     class_stats_max_samples: int | None = None
     strict_class_check: bool = False
+    use_ema: bool = False
+    ema_decay: float = 0.999
+    grad_clip_norm: float | None = None
+    warmup_epochs: int = 0
+    warmup_start_factor: float = 0.1
 
     # runtime device selection: None/auto keeps current auto-detect behavior
     device: str | None = None

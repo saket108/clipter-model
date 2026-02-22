@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import random
 from dataclasses import asdict
@@ -22,6 +23,27 @@ from utils.experiment_logger import ExperimentLogger, make_run_id
 
 
 cfg = Config()
+
+
+class ModelEMA:
+    """Simple EMA wrapper for model weights."""
+
+    def __init__(self, model: torch.nn.Module, decay: float = 0.999):
+        self.decay = float(decay)
+        self.ema = copy.deepcopy(model).eval()
+        for p in self.ema.parameters():
+            p.requires_grad_(False)
+
+    @torch.no_grad()
+    def update(self, model: torch.nn.Module):
+        model_state = model.state_dict()
+        ema_state = self.ema.state_dict()
+        for k, v in ema_state.items():
+            src = model_state[k].detach()
+            if torch.is_floating_point(v):
+                v.mul_(self.decay).add_(src, alpha=1.0 - self.decay)
+            else:
+                v.copy_(src)
 
 
 def resolve_device(device_arg: str | None) -> torch.device:
@@ -526,7 +548,49 @@ def train(
     ).to(device)
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay)
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
+
+    warmup_epochs = max(0, int(cfg.warmup_epochs))
+    warmup_start = min(1.0, max(1e-6, float(cfg.warmup_start_factor)))
+    if warmup_epochs > 0 and epochs > 1:
+        if warmup_epochs >= epochs:
+            scheduler = torch.optim.lr_scheduler.LinearLR(
+                optimizer,
+                start_factor=warmup_start,
+                end_factor=1.0,
+                total_iters=max(1, epochs),
+            )
+            scheduler_name = "linear_warmup_only"
+        else:
+            warmup_scheduler = torch.optim.lr_scheduler.LinearLR(
+                optimizer,
+                start_factor=warmup_start,
+                end_factor=1.0,
+                total_iters=warmup_epochs,
+            )
+            cosine_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+                optimizer,
+                T_max=max(1, epochs - warmup_epochs),
+            )
+            scheduler = torch.optim.lr_scheduler.SequentialLR(
+                optimizer,
+                schedulers=[warmup_scheduler, cosine_scheduler],
+                milestones=[warmup_epochs],
+            )
+            scheduler_name = "linear_warmup+cosine"
+    else:
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=max(1, epochs))
+        scheduler_name = "cosine"
+
+    grad_clip_norm = (
+        float(cfg.grad_clip_norm)
+        if cfg.grad_clip_norm is not None and float(cfg.grad_clip_norm) > 0.0
+        else None
+    )
+    ema = ModelEMA(model, decay=cfg.ema_decay) if bool(cfg.use_ema) else None
+    print(
+        f"Train opts: scheduler={scheduler_name}, warmup_epochs={warmup_epochs}, "
+        f"grad_clip_norm={grad_clip_norm}, ema={bool(ema)}"
+    )
 
     ckpt_dir = Path("checkpoints")
     ckpt_dir.mkdir(parents=True, exist_ok=True)
@@ -569,7 +633,11 @@ def train(
                 losses = criterion(outputs, targets)
                 loss = losses["loss_total"]
                 loss.backward()
+                if grad_clip_norm is not None:
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=grad_clip_norm)
                 optimizer.step()
+                if ema is not None:
+                    ema.update(model)
 
                 bs = images.size(0)
                 running_loss += loss.item() * bs
@@ -592,11 +660,12 @@ def train(
             map75 = None
 
             if val_dl is not None:
-                val_avg = evaluate_val_loss(model, criterion, val_dl, device)
+                eval_model = ema.ema if ema is not None else model
+                val_avg = evaluate_val_loss(eval_model, criterion, val_dl, device)
                 print(f"Validation — loss: {val_avg:.4f}")
 
                 map_metrics = evaluate_model_map(
-                    model=model,
+                    model=eval_model,
                     data_loader=val_dl,
                     device=device,
                     num_classes=num_classes,
@@ -620,7 +689,8 @@ def train(
                     best_loss_path = ckpt_dir / f"light_detr_best_loss{suffix}.pth"
                     torch.save(
                         {
-                            "model_state": model.state_dict(),
+                            "model_state": eval_model.state_dict(),
+                            "ema_used_for_eval": bool(ema),
                             "num_classes": num_classes,
                             "epoch": epoch + 1,
                             "val_loss": val_avg,
@@ -635,7 +705,8 @@ def train(
                     best_map_path = ckpt_dir / f"light_detr_best_map{suffix}.pth"
                     torch.save(
                         {
-                            "model_state": model.state_dict(),
+                            "model_state": eval_model.state_dict(),
+                            "ema_used_for_eval": bool(ema),
                             "num_classes": num_classes,
                             "epoch": epoch + 1,
                             "map": map_val,
@@ -681,7 +752,15 @@ def train(
             scheduler.step()
 
         final_name = f"light_detr{suffix}.pth"
-        torch.save({"model_state": model.state_dict(), "num_classes": num_classes}, final_name)
+        final_model = ema.ema if ema is not None else model
+        torch.save(
+            {
+                "model_state": final_model.state_dict(),
+                "num_classes": num_classes,
+                "ema_used_for_eval": bool(ema),
+            },
+            final_name,
+        )
         print(f"Detection training complete — saved to {final_name}")
 
         summary = {
@@ -704,6 +783,12 @@ def train(
                 str(val_class_stats_path.resolve()) if val_class_stats_path is not None else None
             ),
             "strict_class_check": bool(cfg.strict_class_check),
+            "use_ema": bool(cfg.use_ema),
+            "ema_decay": float(cfg.ema_decay),
+            "grad_clip_norm": grad_clip_norm,
+            "warmup_epochs": warmup_epochs,
+            "warmup_start_factor": warmup_start,
+            "scheduler": scheduler_name,
         }
         summary_path = logger.write_summary(summary, summary_out=summary_out)
         print(f"Run summary saved to: {summary_path}")
@@ -748,6 +833,18 @@ def apply_cli_overrides(args):
         cfg.weight_decay = args.weight_decay
     if args.num_workers is not None:
         cfg.num_workers = args.num_workers
+    if args.warmup_epochs is not None:
+        cfg.warmup_epochs = args.warmup_epochs
+    if args.warmup_start_factor is not None:
+        cfg.warmup_start_factor = args.warmup_start_factor
+    if args.grad_clip_norm is not None:
+        cfg.grad_clip_norm = args.grad_clip_norm
+    if args.use_ema:
+        cfg.use_ema = True
+    if args.no_use_ema:
+        cfg.use_ema = False
+    if args.ema_decay is not None:
+        cfg.ema_decay = args.ema_decay
 
     if args.num_queries is not None:
         cfg.det_num_queries = args.num_queries
@@ -815,6 +912,12 @@ if __name__ == "__main__":
     p.add_argument("--lr", type=float, default=None)
     p.add_argument("--weight-decay", type=float, default=None)
     p.add_argument("--num-workers", type=int, default=None)
+    p.add_argument("--warmup-epochs", type=int, default=None)
+    p.add_argument("--warmup-start-factor", type=float, default=None)
+    p.add_argument("--grad-clip-norm", type=float, default=None)
+    p.add_argument("--use-ema", action="store_true")
+    p.add_argument("--no-use-ema", action="store_true")
+    p.add_argument("--ema-decay", type=float, default=None)
 
     p.add_argument("--num-queries", type=int, default=None, help="override det_num_queries")
     p.add_argument("--decoder-layers", type=int, default=None, help="override det_decoder_layers")
