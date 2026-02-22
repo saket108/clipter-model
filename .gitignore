@@ -1,0 +1,26 @@
+# Local Python environment
+.venv/
+venv/
+
+# Python cache/build artifacts
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+build/
+dist/
+*.egg-info/
+
+# Training artifacts and model weights
+checkpoints/
+*.pth
+*.pt
+*.ckpt
+
+# Generated outputs
+predictions_test/
+predictions_txt_test/
+
+# OS/editor noise
+.DS_Store
+Thumbs.db
