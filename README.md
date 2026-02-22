@@ -8,7 +8,7 @@ Lightweight CLIP + DETR training/inference project.
 python -m venv .venv
 .venv\Scripts\activate
 pip install -U pip
-pip install torch torchvision tqdm pyyaml pillow
+pip install torch torchvision tqdm pyyaml pillow scipy
 ```
 
 If you use extra dependencies in your local code, install those as needed.
@@ -48,6 +48,9 @@ python clipdetr/train_detect.py --fast --subset 512
 Outputs:
 - checkpoints in `checkpoints/`
 - final model `light_detr_fast.pth`
+- best-by-loss checkpoint `checkpoints/light_detr_best_loss_fast.pth`
+- best-by-mAP checkpoint `checkpoints/light_detr_best_map_fast.pth`
+- run logs in `experiments/` (config, per-epoch CSV, summary JSON)
 
 ## 5) Run detector inference
 
@@ -77,9 +80,47 @@ python clipdetr/train_clip.py --fast
 python clipdetr/train_detect.py --clip-init clip_backbone_fast.pth
 ```
 
-## 8) Git workflow
+## 8) Evaluate mAP from a checkpoint
 
-The repo tracks code/config only. Dataset files in `data/` remain local.
+```powershell
+python clipdetr/utils/eval_detect.py `
+  --checkpoint checkpoints/light_detr_best_map_fast.pth `
+  --batch-size 16 `
+  --output-json experiments/eval_best_map_fast.json
+```
+
+## 9) Hyperparameter sweep (lr, batch size, queries, decoder depth)
+
+```powershell
+python clipdetr/utils/sweep_detect.py `
+  --fast `
+  --subset 512 `
+  --lrs 1e-4,5e-5 `
+  --batch-sizes 8,16 `
+  --num-queries 50,100 `
+  --decoder-layers 2,3
+```
+
+Sweep reports are saved under `experiments/sweeps/...`.
+
+## 10) Formal scratch vs CLIP-init comparison
+
+```powershell
+python clipdetr/utils/compare_clip_init.py `
+  --clip-init clip_backbone_fast.pth `
+  --fast `
+  --subset 512
+```
+
+Comparison report is saved under `experiments/comparisons/...`.
+
+## 11) Git workflow / repo hygiene
+
+The repo tracks code/config only. Local artifacts are ignored:
+- `data/`
+- `checkpoints/`
+- `experiments/`
+- `predictions_*`
 
 ```powershell
 git add .

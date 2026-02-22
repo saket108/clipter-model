@@ -42,6 +42,7 @@ class Config:
     classes_path: str = "data/classes.txt"              # optional newline-separated class names file
     train_split: str | None = None                      # optional explicit split override (e.g. "train")
     val_split: str | None = None                        # optional explicit split override (e.g. "valid")
+    train_augment: bool = True                          # apply train-only photometric augmentation
 
     # lightweight DETR settings (for real detection training)
     det_num_queries: int = 50
@@ -57,3 +58,10 @@ class Config:
     # optional bridge from CLIP pretraining to detection
     clip_init_checkpoint: str | None = None            # e.g. "clip_backbone.pth" or checkpoints/...pth
     freeze_backbone_epochs: int = 1                    # freeze image encoder for first N detection epochs
+
+    # evaluation / experiment logging
+    eval_conf_thres: float = 0.001                     # low threshold for mAP eval
+    eval_top_k: int = 100
+    eval_nms_iou: float = 0.0
+    experiments_root: str = "experiments"
+    class_stats_max_samples: int | None = None

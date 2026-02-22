@@ -34,6 +34,7 @@ class YOLODataset(Dataset):
         image_size: int = 224,
         tokenizer=None,
         transform: Optional[T.Compose] = None,
+        augment: bool = False,
         annotation_format: str = "auto",
         annotations_file: Optional[str] = None,
     ):
@@ -41,6 +42,7 @@ class YOLODataset(Dataset):
         self.split = split
         self.image_size = image_size
         self.tokenizer = tokenizer
+        self.augment = augment
 
         if classes_file is not None:
             with open(classes_file, "r", encoding="utf-8") as f:
@@ -103,13 +105,27 @@ class YOLODataset(Dataset):
             self.num_classes = len(self.class_map)
 
         if transform is None:
-            self.transform = T.Compose(
+            tfms = [T.Resize((image_size, image_size))]
+            if self.augment:
+                # Photometric augmentation only; boxes remain unchanged.
+                tfms.extend(
+                    [
+                        T.ColorJitter(
+                            brightness=0.2,
+                            contrast=0.2,
+                            saturation=0.2,
+                            hue=0.02,
+                        ),
+                        T.RandomGrayscale(p=0.05),
+                    ]
+                )
+            tfms.extend(
                 [
-                    T.Resize((image_size, image_size)),
                     T.ToTensor(),
                     T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
                 ]
             )
+            self.transform = T.Compose(tfms)
         else:
             self.transform = transform
 

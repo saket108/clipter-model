@@ -1,7 +1,12 @@
 """Train a lightweight DETR-style detector on YOLO or COCO-JSON annotations."""
+from __future__ import annotations
+
+import argparse
+import json
 import random
+from dataclasses import asdict
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 import torch
 from torch.utils.data import DataLoader, Dataset, Subset
@@ -11,6 +16,9 @@ from config import Config
 from datasets.yolo_dataset import YOLODataset
 from losses.detection_loss import DetectionLoss
 from models.light_detr import LightDETR
+from utils.dataset_stats import compute_class_distribution
+from utils.detection_metrics import evaluate_model_map
+from utils.experiment_logger import ExperimentLogger, make_run_id
 
 
 cfg = Config()
@@ -24,6 +32,15 @@ def set_seed(seed: int):
 
 def count_params(module: torch.nn.Module) -> int:
     return sum(p.numel() for p in module.parameters())
+
+
+def _sanitize_tag(tag: Optional[str]) -> str:
+    if tag is None:
+        return ""
+    raw = tag.strip()
+    if not raw:
+        return ""
+    return "".join(ch if ch.isalnum() or ch in ("-", "_") else "_" for ch in raw)
 
 
 def _unique_non_empty(values):
@@ -201,7 +218,16 @@ def build_datasets():
     )
     val_split = _resolve_split_name(
         data_root,
-        [cfg.val_split, yaml_val_split, "stratified_val_10pct", "stratified_val", "valid", "val", yaml_test_split, "test"],
+        [
+            cfg.val_split,
+            yaml_val_split,
+            "stratified_val_10pct",
+            "stratified_val",
+            "valid",
+            "val",
+            yaml_test_split,
+            "test",
+        ],
     )
 
     if train_split is None:
@@ -244,6 +270,7 @@ def build_datasets():
         classes_file=classes_file,
         image_size=cfg.image_size,
         tokenizer=None,
+        augment=cfg.train_augment,
         annotation_format=cfg.annotation_format,
         annotations_file=train_annotations,
     )
@@ -257,6 +284,7 @@ def build_datasets():
             classes_file=classes_file,
             image_size=cfg.image_size,
             tokenizer=None,
+            augment=False,
             annotation_format=cfg.annotation_format,
             annotations_file=val_annotations,
         )
@@ -269,13 +297,45 @@ def build_datasets():
         f"Annotation mode: train={train_ds.annotation_format}"
         + (f" ({train_ds.annotations_file})" if train_ds.annotations_file is not None else "")
     )
-    return train_ds, val_ds
+    return train_ds, val_ds, train_split, val_split
+
+
+@torch.no_grad()
+def evaluate_val_loss(
+    model: torch.nn.Module,
+    criterion: DetectionLoss,
+    val_dl: DataLoader,
+    device: torch.device,
+) -> float:
+    model.eval()
+    val_loss_sum = 0.0
+    val_n = 0
+
+    for images, targets in val_dl:
+        images = images.to(device, non_blocking=True)
+        targets = [
+            {
+                "boxes": t["boxes"].to(device, non_blocking=True),
+                "labels": t["labels"].to(device, non_blocking=True),
+            }
+            for t in targets
+        ]
+
+        outputs = model(images)
+        losses = criterion(outputs, targets)
+        batch_loss = losses["loss_total"].item()
+        val_loss_sum += batch_loss * images.size(0)
+        val_n += images.size(0)
+
+    return val_loss_sum / max(1, val_n)
 
 
 def train(
     fast: bool = False,
     subset: int | None = None,
     clip_init: str | None = None,
+    experiment_tag: str | None = None,
+    summary_out: str | None = None,
 ):
     set_seed(cfg.seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -283,7 +343,7 @@ def train(
     epochs = 2 if fast else cfg.epochs
     batch_size = min(cfg.batch_size, 8) if fast else cfg.batch_size
 
-    train_ds, val_ds = build_datasets()
+    train_ds, val_ds, train_split, val_split = build_datasets()
 
     if fast and subset is None:
         subset = min(256, len(train_ds))
@@ -321,6 +381,48 @@ def train(
     if num_classes <= 0:
         num_classes = infer_num_classes(base_ds)
     print(f"Detected num_classes={num_classes}")
+
+    run_id = make_run_id(
+        prefix="detect_fast" if fast else "detect",
+        tag=_sanitize_tag(experiment_tag) if experiment_tag else None,
+    )
+    logger = ExperimentLogger(root_dir=cfg.experiments_root, run_id=run_id)
+    print(f"Experiment run_id={logger.run_id}")
+
+    config_payload = {
+        "config": asdict(cfg),
+        "fast": fast,
+        "subset": subset,
+        "clip_init_arg": clip_init,
+        "train_split": train_split,
+        "val_split": val_split,
+        "device": str(device),
+        "resolved_epochs": epochs,
+        "resolved_batch_size": batch_size,
+        "num_classes": num_classes,
+    }
+    logger.log_config(config_payload)
+
+    class_stats = compute_class_distribution(
+        train_ds,
+        num_classes=num_classes,
+        max_samples=cfg.class_stats_max_samples,
+    )
+    class_stats_path = logger.run_dir / "class_distribution.json"
+    with open(class_stats_path, "w", encoding="utf-8") as f:
+        json.dump(class_stats, f, indent=2, sort_keys=True)
+
+    counts = class_stats["counts"]
+    missing_classes = [i for i, c in enumerate(counts) if int(c) == 0]
+    print(
+        "Train class stats: "
+        f"samples_checked={class_stats['num_samples_checked']}, "
+        f"total_boxes={class_stats['total_boxes']}, "
+        f"empty_images={class_stats['empty_images']}, "
+        f"imbalance_ratio={class_stats['imbalance_ratio_max_over_min_nonzero']:.2f}"
+    )
+    if len(missing_classes) > 0:
+        print(f"Warning: classes with zero boxes in train set: {missing_classes}")
 
     model = LightDETR(
         num_classes=num_classes,
@@ -363,104 +465,279 @@ def train(
     ckpt_dir = Path("checkpoints")
     ckpt_dir.mkdir(parents=True, exist_ok=True)
 
+    suffix = "_fast" if fast else ""
+    tag_safe = _sanitize_tag(experiment_tag)
+    if tag_safe:
+        suffix = f"{suffix}_{tag_safe}" if suffix else f"_{tag_safe}"
+
     best_val_loss = float("inf")
-    for epoch in range(epochs):
-        if clip_init_path and freeze_epochs > 0 and epoch == freeze_epochs:
-            set_backbone_trainable(model, trainable=True)
-            print("Backbone unfrozen; full detector is now trainable.")
+    best_map = -1.0
+    best_loss_epoch = None
+    best_map_epoch = None
+    best_loss_path = None
+    best_map_path = None
 
-        model.train()
-        running_loss = 0.0
-        running_items = 0
-        loop = tqdm(train_dl, desc=f"Detect Epoch [{epoch + 1}/{epochs}]")
+    try:
+        for epoch in range(epochs):
+            if clip_init_path and freeze_epochs > 0 and epoch == freeze_epochs:
+                set_backbone_trainable(model, trainable=True)
+                print("Backbone unfrozen; full detector is now trainable.")
 
-        for images, targets in loop:
-            images = images.to(device, non_blocking=True)
-            targets = [
+            model.train()
+            running_loss = 0.0
+            running_items = 0
+            loop = tqdm(train_dl, desc=f"Detect Epoch [{epoch + 1}/{epochs}]")
+
+            for images, targets in loop:
+                images = images.to(device, non_blocking=True)
+                targets = [
+                    {
+                        "boxes": t["boxes"].to(device, non_blocking=True),
+                        "labels": t["labels"].to(device, non_blocking=True),
+                    }
+                    for t in targets
+                ]
+
+                optimizer.zero_grad(set_to_none=True)
+                outputs = model(images)
+                losses = criterion(outputs, targets)
+                loss = losses["loss_total"]
+                loss.backward()
+                optimizer.step()
+
+                bs = images.size(0)
+                running_loss += loss.item() * bs
+                running_items += bs
+                loop.set_postfix(
+                    loss=f"{loss.item():.4f}",
+                    ce=f"{losses['loss_ce'].item():.4f}",
+                    bbox=f"{losses['loss_bbox'].item():.4f}",
+                    giou=f"{losses['loss_giou'].item():.4f}",
+                )
+
+            avg_train = running_loss / max(1, running_items)
+            current_lr = float(optimizer.param_groups[0]["lr"])
+            print(f"Epoch {epoch + 1}/{epochs} — train_loss: {avg_train:.4f} — lr: {current_lr:.2e}")
+
+            val_avg = None
+            map_metrics = None
+            map_val = None
+            map50 = None
+            map75 = None
+
+            if val_dl is not None:
+                val_avg = evaluate_val_loss(model, criterion, val_dl, device)
+                print(f"Validation — loss: {val_avg:.4f}")
+
+                map_metrics = evaluate_model_map(
+                    model=model,
+                    data_loader=val_dl,
+                    device=device,
+                    num_classes=num_classes,
+                    conf_thres=cfg.eval_conf_thres,
+                    top_k=cfg.eval_top_k,
+                    nms_iou=cfg.eval_nms_iou,
+                )
+                map_val = float(map_metrics["map"])
+                map50 = float(map_metrics["map50"])
+                map75 = float(map_metrics["map75"])
+                print(
+                    "Validation — "
+                    f"mAP@[.50:.95]: {map_val:.4f} | "
+                    f"mAP@0.50: {map50:.4f} | "
+                    f"mAP@0.75: {map75:.4f}"
+                )
+
+                if val_avg < best_val_loss:
+                    best_val_loss = val_avg
+                    best_loss_epoch = epoch + 1
+                    best_loss_path = ckpt_dir / f"light_detr_best_loss{suffix}.pth"
+                    torch.save(
+                        {
+                            "model_state": model.state_dict(),
+                            "num_classes": num_classes,
+                            "epoch": epoch + 1,
+                            "val_loss": val_avg,
+                        },
+                        best_loss_path,
+                    )
+                    print("Saved new best detector checkpoint by loss")
+
+                if map_val > best_map:
+                    best_map = map_val
+                    best_map_epoch = epoch + 1
+                    best_map_path = ckpt_dir / f"light_detr_best_map{suffix}.pth"
+                    torch.save(
+                        {
+                            "model_state": model.state_dict(),
+                            "num_classes": num_classes,
+                            "epoch": epoch + 1,
+                            "map": map_val,
+                            "map50": map50,
+                            "map75": map75,
+                            "metrics": map_metrics,
+                        },
+                        best_map_path,
+                    )
+                    print("Saved new best detector checkpoint by mAP")
+
+            epoch_ckpt_path = ckpt_dir / f"light_detr_epoch{epoch + 1}{suffix}.pth"
+            torch.save(
                 {
-                    "boxes": t["boxes"].to(device, non_blocking=True),
-                    "labels": t["labels"].to(device, non_blocking=True),
-                }
-                for t in targets
-            ]
-
-            optimizer.zero_grad(set_to_none=True)
-            outputs = model(images)
-            losses = criterion(outputs, targets)
-            loss = losses["loss_total"]
-            loss.backward()
-            optimizer.step()
-
-            bs = images.size(0)
-            running_loss += loss.item() * bs
-            running_items += bs
-            loop.set_postfix(
-                loss=f"{loss.item():.4f}",
-                ce=f"{losses['loss_ce'].item():.4f}",
-                bbox=f"{losses['loss_bbox'].item():.4f}",
-                giou=f"{losses['loss_giou'].item():.4f}",
+                    "epoch": epoch + 1,
+                    "model_state": model.state_dict(),
+                    "optimizer_state": optimizer.state_dict(),
+                    "scheduler_state": scheduler.state_dict(),
+                    "num_classes": num_classes,
+                    "train_loss": avg_train,
+                    "val_loss": val_avg,
+                    "map": map_val,
+                    "map50": map50,
+                    "map75": map75,
+                },
+                epoch_ckpt_path,
             )
 
-        scheduler.step()
-        avg_train = running_loss / max(1, running_items)
-        print(f"Epoch {epoch + 1}/{epochs} — train_loss: {avg_train:.4f}")
+            logger.log_epoch(
+                {
+                    "epoch": epoch + 1,
+                    "lr": current_lr,
+                    "train_loss": avg_train,
+                    "val_loss": val_avg,
+                    "map": map_val,
+                    "map50": map50,
+                    "map75": map75,
+                    "best_val_loss_so_far": best_val_loss if best_val_loss < float("inf") else None,
+                    "best_map_so_far": best_map if best_map >= 0 else None,
+                }
+            )
 
-        torch.save(
-            {
-                "epoch": epoch + 1,
-                "model_state": model.state_dict(),
-                "optimizer_state": optimizer.state_dict(),
-                "num_classes": num_classes,
-            },
-            ckpt_dir / f"light_detr_epoch{epoch + 1}{'_fast' if fast else ''}.pth",
-        )
+            scheduler.step()
 
-        if val_dl is not None:
-            model.eval()
-            val_loss_sum = 0.0
-            val_n = 0
-            with torch.no_grad():
-                for images, targets in val_dl:
-                    images = images.to(device, non_blocking=True)
-                    targets = [
-                        {
-                            "boxes": t["boxes"].to(device, non_blocking=True),
-                            "labels": t["labels"].to(device, non_blocking=True),
-                        }
-                        for t in targets
-                    ]
+        final_name = f"light_detr{suffix}.pth"
+        torch.save({"model_state": model.state_dict(), "num_classes": num_classes}, final_name)
+        print(f"Detection training complete — saved to {final_name}")
 
-                    outputs = model(images)
-                    losses = criterion(outputs, targets)
-                    batch_loss = losses["loss_total"].item()
-                    val_loss_sum += batch_loss * images.size(0)
-                    val_n += images.size(0)
+        summary = {
+            "run_id": logger.run_id,
+            "final_checkpoint": str(Path(final_name).resolve()),
+            "best_loss_checkpoint": str(best_loss_path.resolve()) if best_loss_path else None,
+            "best_map_checkpoint": str(best_map_path.resolve()) if best_map_path else None,
+            "best_val_loss": best_val_loss if best_val_loss < float("inf") else None,
+            "best_val_loss_epoch": best_loss_epoch,
+            "best_map": best_map if best_map >= 0 else None,
+            "best_map_epoch": best_map_epoch,
+            "num_classes": num_classes,
+            "fast": fast,
+            "subset": subset,
+            "clip_init_used": clip_init_path,
+            "train_split": train_split,
+            "val_split": val_split,
+            "class_distribution_path": str(class_stats_path.resolve()),
+        }
+        summary_path = logger.write_summary(summary, summary_out=summary_out)
+        print(f"Run summary saved to: {summary_path}")
+        return summary
+    finally:
+        logger.close()
 
-            val_avg = val_loss_sum / max(1, val_n)
-            print(f"Validation — loss: {val_avg:.4f}")
 
-            if val_avg < best_val_loss:
-                best_val_loss = val_avg
-                torch.save(
-                    {
-                        "model_state": model.state_dict(),
-                        "num_classes": num_classes,
-                    },
-                    ckpt_dir / f"light_detr_best{'_fast' if fast else ''}.pth",
-                )
-                print("Saved new best detector checkpoint")
+def apply_cli_overrides(args):
+    if args.data_root is not None:
+        cfg.data_root = args.data_root
+    if args.data_yaml is not None:
+        cfg.data_yaml = args.data_yaml
+    if args.classes_path is not None:
+        cfg.classes_path = args.classes_path
+    if args.train_split is not None:
+        cfg.train_split = args.train_split
+    if args.val_split is not None:
+        cfg.val_split = args.val_split
 
-    final_name = "light_detr_fast.pth" if fast else "light_detr.pth"
-    torch.save({"model_state": model.state_dict(), "num_classes": num_classes}, final_name)
-    print(f"Detection training complete — saved to {final_name}")
+    if args.seed is not None:
+        cfg.seed = args.seed
+    if args.epochs is not None:
+        cfg.epochs = args.epochs
+    if args.batch_size is not None:
+        cfg.batch_size = args.batch_size
+    if args.lr is not None:
+        cfg.lr = args.lr
+    if args.weight_decay is not None:
+        cfg.weight_decay = args.weight_decay
+    if args.num_workers is not None:
+        cfg.num_workers = args.num_workers
+
+    if args.num_queries is not None:
+        cfg.det_num_queries = args.num_queries
+    if args.decoder_layers is not None:
+        cfg.det_decoder_layers = args.decoder_layers
+    if args.num_heads is not None:
+        cfg.det_num_heads = args.num_heads
+    if args.ff_dim is not None:
+        cfg.det_ff_dim = args.ff_dim
+    if args.freeze_backbone_epochs is not None:
+        cfg.freeze_backbone_epochs = args.freeze_backbone_epochs
+
+    if args.eval_conf_thres is not None:
+        cfg.eval_conf_thres = args.eval_conf_thres
+    if args.eval_top_k is not None:
+        cfg.eval_top_k = args.eval_top_k
+    if args.eval_nms_iou is not None:
+        cfg.eval_nms_iou = args.eval_nms_iou
+
+    if args.experiments_root is not None:
+        cfg.experiments_root = args.experiments_root
+    if args.class_stats_max_samples is not None:
+        cfg.class_stats_max_samples = args.class_stats_max_samples
+
+    if args.no_train_augment:
+        cfg.train_augment = False
+    elif args.train_augment:
+        cfg.train_augment = True
 
 
 if __name__ == "__main__":
-    import argparse
-
     p = argparse.ArgumentParser()
     p.add_argument("--fast", action="store_true", help="run a small quick training")
     p.add_argument("--subset", type=int, default=None, help="limit train samples")
     p.add_argument("--clip-init", type=str, default=None, help="optional CLIP checkpoint to initialize image encoder")
+    p.add_argument("--tag", type=str, default=None, help="optional experiment tag for run/checkpoint naming")
+    p.add_argument("--summary-out", type=str, default=None, help="optional JSON path for writing run summary")
+
+    p.add_argument("--data-root", type=str, default=None, help="override cfg.data_root")
+    p.add_argument("--data-yaml", type=str, default=None, help="override cfg.data_yaml")
+    p.add_argument("--classes-path", type=str, default=None, help="override cfg.classes_path")
+    p.add_argument("--train-split", type=str, default=None, help="override cfg.train_split")
+    p.add_argument("--val-split", type=str, default=None, help="override cfg.val_split")
+
+    p.add_argument("--seed", type=int, default=None)
+    p.add_argument("--epochs", type=int, default=None)
+    p.add_argument("--batch-size", type=int, default=None)
+    p.add_argument("--lr", type=float, default=None)
+    p.add_argument("--weight-decay", type=float, default=None)
+    p.add_argument("--num-workers", type=int, default=None)
+
+    p.add_argument("--num-queries", type=int, default=None, help="override det_num_queries")
+    p.add_argument("--decoder-layers", type=int, default=None, help="override det_decoder_layers")
+    p.add_argument("--num-heads", type=int, default=None, help="override det_num_heads")
+    p.add_argument("--ff-dim", type=int, default=None, help="override det_ff_dim")
+    p.add_argument("--freeze-backbone-epochs", type=int, default=None)
+
+    p.add_argument("--eval-conf-thres", type=float, default=None)
+    p.add_argument("--eval-top-k", type=int, default=None)
+    p.add_argument("--eval-nms-iou", type=float, default=None)
+
+    p.add_argument("--experiments-root", type=str, default=None)
+    p.add_argument("--class-stats-max-samples", type=int, default=None)
+    p.add_argument("--train-augment", action="store_true", help="force-enable train augmentation")
+    p.add_argument("--no-train-augment", action="store_true", help="disable train augmentation")
+
     args = p.parse_args()
-    train(fast=args.fast, subset=args.subset, clip_init=args.clip_init)
+    apply_cli_overrides(args)
+    train(
+        fast=args.fast,
+        subset=args.subset,
+        clip_init=args.clip_init,
+        experiment_tag=args.tag,
+        summary_out=args.summary_out,
+    )
