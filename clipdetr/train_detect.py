@@ -24,6 +24,24 @@ from utils.experiment_logger import ExperimentLogger, make_run_id
 cfg = Config()
 
 
+def resolve_device(device_arg: str | None) -> torch.device:
+    requested = (device_arg or "").strip().lower()
+
+    if not requested or requested == "auto":
+        return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if requested == "cpu":
+        return torch.device("cpu")
+    if requested == "cuda":
+        if not torch.cuda.is_available():
+            raise RuntimeError(
+                "Requested --device cuda but CUDA is not available. "
+                "Use --device cpu or run on a CUDA-enabled setup."
+            )
+        return torch.device("cuda")
+
+    raise ValueError(f"Unsupported device option: {device_arg!r}")
+
+
 def set_seed(seed: int):
     random.seed(seed)
     torch.manual_seed(seed)
@@ -336,9 +354,12 @@ def train(
     clip_init: str | None = None,
     experiment_tag: str | None = None,
     summary_out: str | None = None,
+    device_override: str | None = None,
 ):
     set_seed(cfg.seed)
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    requested_device = device_override if device_override is not None else cfg.device
+    device = resolve_device(requested_device)
+    print(f"Using device: {device}")
 
     epochs = 2 if fast else cfg.epochs
     batch_size = min(cfg.batch_size, 8) if fast else cfg.batch_size
@@ -396,6 +417,7 @@ def train(
         "clip_init_arg": clip_init,
         "train_split": train_split,
         "val_split": val_split,
+        "requested_device": requested_device,
         "device": str(device),
         "resolved_epochs": epochs,
         "resolved_batch_size": batch_size,
@@ -653,6 +675,18 @@ def apply_cli_overrides(args):
         cfg.train_split = args.train_split
     if args.val_split is not None:
         cfg.val_split = args.val_split
+    if args.image_size is not None:
+        cfg.image_size = args.image_size
+    if args.image_backbone is not None:
+        cfg.image_backbone = args.image_backbone
+    if args.embed_dim is not None:
+        cfg.embed_dim = args.embed_dim
+    if args.det_dropout is not None:
+        cfg.det_dropout = args.det_dropout
+    if args.image_pretrained:
+        cfg.image_pretrained = True
+    elif args.no_image_pretrained:
+        cfg.image_pretrained = False
 
     if args.seed is not None:
         cfg.seed = args.seed
@@ -689,6 +723,8 @@ def apply_cli_overrides(args):
         cfg.experiments_root = args.experiments_root
     if args.class_stats_max_samples is not None:
         cfg.class_stats_max_samples = args.class_stats_max_samples
+    if args.device is not None:
+        cfg.device = args.device
 
     if args.no_train_augment:
         cfg.train_augment = False
@@ -709,6 +745,17 @@ if __name__ == "__main__":
     p.add_argument("--classes-path", type=str, default=None, help="override cfg.classes_path")
     p.add_argument("--train-split", type=str, default=None, help="override cfg.train_split")
     p.add_argument("--val-split", type=str, default=None, help="override cfg.val_split")
+    p.add_argument("--image-size", type=int, default=None, help="override cfg.image_size")
+    p.add_argument(
+        "--image-backbone",
+        type=str,
+        choices=["mobilenet_v3_small", "convnext_tiny"],
+        default=None,
+        help="override cfg.image_backbone",
+    )
+    p.add_argument("--embed-dim", type=int, default=None, help="override cfg.embed_dim")
+    p.add_argument("--image-pretrained", action="store_true", help="enable pretrained image backbone")
+    p.add_argument("--no-image-pretrained", action="store_true", help="disable pretrained image backbone")
 
     p.add_argument("--seed", type=int, default=None)
     p.add_argument("--epochs", type=int, default=None)
@@ -721,6 +768,7 @@ if __name__ == "__main__":
     p.add_argument("--decoder-layers", type=int, default=None, help="override det_decoder_layers")
     p.add_argument("--num-heads", type=int, default=None, help="override det_num_heads")
     p.add_argument("--ff-dim", type=int, default=None, help="override det_ff_dim")
+    p.add_argument("--det-dropout", type=float, default=None, help="override det_dropout")
     p.add_argument("--freeze-backbone-epochs", type=int, default=None)
 
     p.add_argument("--eval-conf-thres", type=float, default=None)
@@ -729,6 +777,13 @@ if __name__ == "__main__":
 
     p.add_argument("--experiments-root", type=str, default=None)
     p.add_argument("--class-stats-max-samples", type=int, default=None)
+    p.add_argument(
+        "--device",
+        type=str,
+        choices=["auto", "cpu", "cuda"],
+        default=None,
+        help="force training device (default: auto-detect)",
+    )
     p.add_argument("--train-augment", action="store_true", help="force-enable train augmentation")
     p.add_argument("--no-train-augment", action="store_true", help="disable train augmentation")
 
@@ -740,4 +795,5 @@ if __name__ == "__main__":
         clip_init=args.clip_init,
         experiment_tag=args.tag,
         summary_out=args.summary_out,
+        device_override=args.device,
     )

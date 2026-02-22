@@ -65,3 +65,6 @@ class Config:
     eval_nms_iou: float = 0.0
     experiments_root: str = "experiments"
     class_stats_max_samples: int | None = None
+
+    # runtime device selection: None/auto keeps current auto-detect behavior
+    device: str | None = None

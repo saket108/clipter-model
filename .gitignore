@@ -21,6 +21,7 @@ checkpoints/
 predictions_test/
 predictions_txt_test/
 experiments/
+reports/
 
 # Local dataset (keep out of Git)
 data/

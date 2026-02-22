@@ -73,6 +73,12 @@ python clipdetr/train_detect.py
 Final output model:
 - `light_detr.pth`
 
+Useful runtime overrides:
+- `--device auto|cpu|cuda`
+- `--image-backbone mobilenet_v3_small|convnext_tiny`
+- `--image-size <int>`
+- `--embed-dim <int>`
+
 ## 7) Optional CLIP pretrain -> detector init
 
 ```powershell
@@ -126,4 +132,43 @@ The repo tracks code/config only. Local artifacts are ignored:
 git add .
 git commit -m "Describe your change"
 git push
+```
+
+## 12) Research plan execution (GPU later)
+
+Plan files are in `configs/research/`.
+
+Run stage-1 sanity plan:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/run_detect_plan.ps1 `
+  -Plan configs/research/stage1_sanity.json `
+  -DataRoot "C:\Users\tsake\OneDrive\Desktop\full dataset\merged_dataset" `
+  -DataYaml data.yaml `
+  -TrainSplit train `
+  -ValSplit valid `
+  -Device cuda `
+  -ClipInit clip_backbone_fast.pth
+```
+
+Run stage-2 full plan:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/run_detect_plan.ps1 `
+  -Plan configs/research/stage2_full.json `
+  -DataRoot "C:\Users\tsake\OneDrive\Desktop\full dataset\merged_dataset" `
+  -DataYaml data.yaml `
+  -TrainSplit train `
+  -ValSplit valid `
+  -Device cuda `
+  -ClipInit clip_backbone_fast.pth
+```
+
+Aggregate experiment reports:
+
+```powershell
+python clipdetr/utils/aggregate_detect_results.py `
+  --experiments-root experiments `
+  --output-csv reports/detect_runs_flat.csv `
+  --output-grouped-csv reports/detect_runs_grouped.csv
 ```
