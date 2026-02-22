@@ -165,7 +165,7 @@ class DetectionLoss(nn.Module):
         loss_ce = F.cross_entropy(
             src_logits.transpose(1, 2),
             target_classes,
-            weight=self.empty_weight,
+            weight=self.empty_weight.to(src_logits.device),
         )
         return {"loss_ce": loss_ce}
 

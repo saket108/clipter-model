@@ -479,7 +479,7 @@ def train(
         bbox_loss_coef=cfg.det_bbox_loss_coef,
         giou_loss_coef=cfg.det_giou_loss_coef,
         eos_coef=cfg.det_eos_coef,
-    )
+    ).to(device)
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
