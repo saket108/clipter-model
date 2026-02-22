@@ -216,6 +216,11 @@ def infer_num_classes(ds: Dataset, max_samples: int = 2000) -> int:
     return max(1, max_cls + 1)
 
 
+def _nonzero_class_ids(class_stats: dict) -> set[int]:
+    counts = class_stats.get("counts", [])
+    return {i for i, c in enumerate(counts) if int(c) > 0}
+
+
 def build_datasets():
     data_root = Path(cfg.data_root)
     data_yaml = _load_data_yaml(data_root, cfg.data_yaml)
@@ -446,6 +451,45 @@ def train(
     if len(missing_classes) > 0:
         print(f"Warning: classes with zero boxes in train set: {missing_classes}")
 
+    val_class_stats_path = None
+    if val_ds is not None:
+        consistency_train_stats = class_stats
+        if cfg.strict_class_check and train_ds is not base_ds:
+            consistency_train_stats = compute_class_distribution(
+                base_ds,
+                num_classes=num_classes,
+                max_samples=cfg.class_stats_max_samples,
+            )
+
+        val_class_stats = compute_class_distribution(
+            val_ds,
+            num_classes=num_classes,
+            max_samples=cfg.class_stats_max_samples,
+        )
+        val_class_stats_path = logger.run_dir / "val_class_distribution.json"
+        with open(val_class_stats_path, "w", encoding="utf-8") as f:
+            json.dump(val_class_stats, f, indent=2, sort_keys=True)
+
+        print(
+            "Val class stats: "
+            f"samples_checked={val_class_stats['num_samples_checked']}, "
+            f"total_boxes={val_class_stats['total_boxes']}, "
+            f"empty_images={val_class_stats['empty_images']}, "
+            f"imbalance_ratio={val_class_stats['imbalance_ratio_max_over_min_nonzero']:.2f}"
+        )
+
+        train_present = _nonzero_class_ids(consistency_train_stats)
+        val_present = _nonzero_class_ids(val_class_stats)
+        val_only = sorted(val_present - train_present)
+        if len(val_only) > 0:
+            msg = (
+                "Validation has classes with boxes that are missing in training: "
+                f"{val_only}. This usually indicates split/class-map mismatch."
+            )
+            if cfg.strict_class_check:
+                raise RuntimeError(msg)
+            print(f"Warning: {msg}")
+
     model = LightDETR(
         num_classes=num_classes,
         hidden_dim=cfg.embed_dim,
@@ -656,6 +700,10 @@ def train(
             "train_split": train_split,
             "val_split": val_split,
             "class_distribution_path": str(class_stats_path.resolve()),
+            "val_class_distribution_path": (
+                str(val_class_stats_path.resolve()) if val_class_stats_path is not None else None
+            ),
+            "strict_class_check": bool(cfg.strict_class_check),
         }
         summary_path = logger.write_summary(summary, summary_out=summary_out)
         print(f"Run summary saved to: {summary_path}")
@@ -725,6 +773,10 @@ def apply_cli_overrides(args):
         cfg.class_stats_max_samples = args.class_stats_max_samples
     if args.device is not None:
         cfg.device = args.device
+    if args.strict_class_check:
+        cfg.strict_class_check = True
+    if args.no_strict_class_check:
+        cfg.strict_class_check = False
 
     if args.no_train_augment:
         cfg.train_augment = False
@@ -777,6 +829,8 @@ if __name__ == "__main__":
 
     p.add_argument("--experiments-root", type=str, default=None)
     p.add_argument("--class-stats-max-samples", type=int, default=None)
+    p.add_argument("--strict-class-check", action="store_true", help="fail if validation contains classes missing in train")
+    p.add_argument("--no-strict-class-check", action="store_true", help="disable strict train/val class consistency check")
     p.add_argument(
         "--device",
         type=str,

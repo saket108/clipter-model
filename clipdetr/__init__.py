@@ -1,0 +1,1 @@
+"""clipdetr package."""

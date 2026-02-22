@@ -78,6 +78,7 @@ Useful runtime overrides:
 - `--image-backbone mobilenet_v3_small|convnext_tiny`
 - `--image-size <int>`
 - `--embed-dim <int>`
+- `--strict-class-check` (fail fast if val has classes missing in train)
 
 ## 7) Optional CLIP pretrain -> detector init
 
@@ -171,4 +172,17 @@ python clipdetr/utils/aggregate_detect_results.py `
   --experiments-root experiments `
   --output-csv reports/detect_runs_flat.csv `
   --output-grouped-csv reports/detect_runs_grouped.csv
+```
+
+## 13) Dataset audit before long runs
+
+Use this to verify class/split integrity before expensive training:
+
+```powershell
+python clipdetr/utils/audit_detect_dataset.py `
+  --data-root "C:\Users\tsake\OneDrive\Desktop\full dataset\merged_dataset" `
+  --data-yaml data.yaml `
+  --train-split train `
+  --val-split valid `
+  --output-json reports/dataset_audit.json
 ```
