@@ -45,6 +45,22 @@ python dataset_smoke.py
 python clipdetr/train_detect.py --fast --subset 512
 ```
 
+YOLO-style single entrypoint (from `data.yaml`):
+
+```powershell
+python scripts/train_from_data_yaml.py `
+  --data "C:\path\to\dataset\data.yaml" `
+  --device auto `
+  --epochs 80 `
+  --batch-size 8 `
+  --image-backbone convnext_tiny `
+  --image-size 320 `
+  --embed-dim 384 `
+  --tag strong_recipe_v1
+```
+
+This wrapper auto-resolves dataset root + train/val split names from `data.yaml` and launches `clipdetr/train_detect.py`.
+
 Outputs:
 - checkpoints in `checkpoints/`
 - final model `light_detr_fast.pth`
@@ -73,6 +89,12 @@ python clipdetr/train_detect.py
 Final output model:
 - `light_detr.pth`
 
+Current training defaults:
+- image backbone starts from pretrained torchvision weights (`image_pretrained=True`)
+- strict train/val class consistency is enabled (`strict_class_check=True`)
+- CLIP-init is auto-discovered if one of these exists: `clip_backbone*.pth` (repo root or `checkpoints/`)
+- train augmentation now includes box-aware geometric transforms (random crop + horizontal flip)
+
 Useful runtime overrides:
 - `--device auto|cpu|cuda`
 - `--image-backbone mobilenet_v3_small|convnext_tiny`
@@ -91,7 +113,7 @@ python clipdetr/train_detect.py `
   --data-yaml data.yaml `
   --train-split train `
   --val-split valid `
-  --device cuda `
+  --device auto `
   --image-backbone convnext_tiny `
   --image-size 320 `
   --embed-dim 384 `
@@ -114,6 +136,8 @@ python clipdetr/train_clip.py --fast
 python clipdetr/train_detect.py --clip-init clip_backbone_fast.pth
 ```
 
+If you omit `--clip-init`, training will still auto-pick a checkpoint when available unless `--no-auto-clip-init` is set.
+
 ## 8) Evaluate mAP from a checkpoint
 
 ```powershell
@@ -121,6 +145,19 @@ python clipdetr/utils/eval_detect.py `
   --checkpoint checkpoints/light_detr_best_map_fast.pth `
   --batch-size 16 `
   --output-json experiments/eval_best_map_fast.json
+```
+
+Tune postprocess thresholds on validation split:
+
+```powershell
+python clipdetr/utils/tune_detect_thresholds.py `
+  --checkpoint checkpoints/light_detr_best_map_fast.pth `
+  --batch-size 16 `
+  --conf-grid 0.001,0.01,0.05,0.1,0.2,0.3 `
+  --nms-grid 0.0,0.3,0.5 `
+  --topk-grid 50,100 `
+  --optimize map `
+  --output-json experiments/threshold_sweeps/best_thresholds.json
 ```
 
 ## 9) Hyperparameter sweep (lr, batch size, queries, decoder depth)
@@ -175,9 +212,11 @@ powershell -ExecutionPolicy Bypass -File scripts/run_detect_plan.ps1 `
   -DataYaml data.yaml `
   -TrainSplit train `
   -ValSplit valid `
-  -Device cuda `
+  -Device auto `
   -ClipInit clip_backbone_fast.pth
 ```
+
+If `use_clip_init=true` in a plan and `-ClipInit` is missing or invalid, the runner falls back to `--auto-clip-init` automatically.
 
 Run stage-2 full plan:
 
@@ -188,8 +227,20 @@ powershell -ExecutionPolicy Bypass -File scripts/run_detect_plan.ps1 `
   -DataYaml data.yaml `
   -TrainSplit train `
   -ValSplit valid `
-  -Device cuda `
+  -Device auto `
   -ClipInit clip_backbone_fast.pth
+```
+
+Run strong recipe preset:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/run_detect_plan.ps1 `
+  -Plan configs/research/strong_recipe_v1.json `
+  -DataRoot "C:\Users\tsake\OneDrive\Desktop\full dataset\merged_dataset" `
+  -DataYaml data.yaml `
+  -TrainSplit train `
+  -ValSplit valid `
+  -Device auto
 ```
 
 Aggregate experiment reports:
@@ -213,3 +264,36 @@ python clipdetr/utils/audit_detect_dataset.py `
   --val-split valid `
   --output-json reports/dataset_audit.json
 ```
+
+## 14) Custom dataset splitting (80/10/10, 70/20/10, etc.)
+
+Use this to repartition a YOLO dataset into any train/val/test ratio you want.
+
+Example: 80/10/10 from existing `train,valid,test` content:
+
+```powershell
+python -m clipdetr.utils.split_yolo_dataset `
+  --root "C:\Users\tsake\OneDrive\Desktop\one drive things\OneDrive\final dastaset for the project\merged_dataset" `
+  --source-splits train,valid,test `
+  --split-names train,valid,test `
+  --ratios 80,10,10 `
+  --seed 42 `
+  --overwrite
+```
+
+Example: 70/20/10:
+
+```powershell
+python -m clipdetr.utils.split_yolo_dataset `
+  --root "C:\Users\tsake\OneDrive\Desktop\one drive things\OneDrive\final dastaset for the project\merged_dataset" `
+  --source-splits train,valid,test `
+  --split-names train,valid,test `
+  --ratios 70,20,10 `
+  --seed 42 `
+  --overwrite
+```
+
+Notes:
+- The splitter can auto-detect source layout (`<root>/images` or `<root>/<split>/images`).
+- It stratifies by primary class by default.
+- It writes/updates `data.yaml` in the output root unless `--no-write-yaml` is set.

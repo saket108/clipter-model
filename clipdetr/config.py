@@ -10,7 +10,7 @@ class Config:
 
     # lightweight defaults (close to YOLO-n scale parameter budget)
     image_backbone: str = "mobilenet_v3_small"
-    image_pretrained: bool = False
+    image_pretrained: bool = True
     embed_dim: int = 288     # shared encoder width
     proj_dim: int = 256      # final projection dim (CLIP space)
     vocab_size: int = 2048   # capped text vocab for a compact embedding table
@@ -22,7 +22,7 @@ class Config:
     # optimization
     batch_size: int = 64
     lr: float = 1e-4
-    weight_decay: float = 0.0
+    weight_decay: float = 1e-4
     epochs: int = 5
 
     # contrastive / scaling
@@ -57,6 +57,7 @@ class Config:
 
     # optional bridge from CLIP pretraining to detection
     clip_init_checkpoint: str | None = None            # e.g. "clip_backbone.pth" or checkpoints/...pth
+    auto_clip_init: bool = True                        # auto-pick a CLIP init checkpoint if available
     freeze_backbone_epochs: int = 1                    # freeze image encoder for first N detection epochs
 
     # evaluation / experiment logging
@@ -65,7 +66,7 @@ class Config:
     eval_nms_iou: float = 0.0
     experiments_root: str = "experiments"
     class_stats_max_samples: int | None = None
-    strict_class_check: bool = False
+    strict_class_check: bool = True
     use_ema: bool = False
     ema_decay: float = 0.999
     grad_clip_norm: float | None = None

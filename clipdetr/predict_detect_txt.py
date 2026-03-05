@@ -103,24 +103,24 @@ def main():
     if not checkpoint_path.exists():
         raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
 
-    state_dict, num_classes = load_checkpoint(checkpoint_path, device)
+    state_dict, num_classes, model_cfg = load_checkpoint(checkpoint_path, device)
     print(f"Loaded checkpoint: {checkpoint_path} (num_classes={num_classes})")
 
     model = LightDETR(
         num_classes=num_classes,
-        hidden_dim=cfg.embed_dim,
-        num_queries=cfg.det_num_queries,
-        decoder_layers=cfg.det_decoder_layers,
-        num_heads=cfg.det_num_heads,
-        ff_dim=cfg.det_ff_dim,
-        dropout=cfg.det_dropout,
-        image_backbone=cfg.image_backbone,
+        hidden_dim=int(model_cfg["hidden_dim"]),
+        num_queries=int(model_cfg["num_queries"]),
+        decoder_layers=int(model_cfg["decoder_layers"]),
+        num_heads=int(model_cfg["num_heads"]),
+        ff_dim=int(model_cfg["ff_dim"]),
+        dropout=float(model_cfg["dropout"]),
+        image_backbone=str(model_cfg["image_backbone"]),
         image_pretrained=False,
     ).to(device)
     model.load_state_dict(state_dict, strict=True)
     model.eval()
 
-    image_size = args.image_size if args.image_size is not None else cfg.image_size
+    image_size = args.image_size if args.image_size is not None else int(model_cfg["image_size"])
     preprocess = T.Compose(
         [
             T.Resize((image_size, image_size)),

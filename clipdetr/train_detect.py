@@ -163,6 +163,50 @@ def _resolve_annotation_file(root: Path, candidates):
     return None
 
 
+def _resolve_clip_init_path(clip_init_arg: str | None):
+    """Resolve CLIP-init checkpoint from CLI, config, or auto-discovery."""
+    explicit = str(clip_init_arg).strip() if clip_init_arg is not None else ""
+    if explicit:
+        p = Path(explicit)
+        if not p.exists():
+            raise FileNotFoundError(f"Requested --clip-init checkpoint not found: {p}")
+        return str(p), "cli"
+
+    configured = str(cfg.clip_init_checkpoint).strip() if cfg.clip_init_checkpoint is not None else ""
+    if configured:
+        p = Path(configured)
+        if p.exists():
+            return str(p), "config"
+        print(f"Warning: cfg.clip_init_checkpoint not found on disk: {p}")
+
+    if not bool(cfg.auto_clip_init):
+        return None, None
+
+    candidates = [
+        Path("clip_backbone.pth"),
+        Path("clip_backbone_fast.pth"),
+        Path("checkpoints") / "clip_backbone.pth",
+        Path("checkpoints") / "clip_backbone_fast.pth",
+    ]
+    for p in candidates:
+        if p.exists():
+            return str(p), "auto"
+    return None, None
+
+
+def _model_config_payload():
+    return {
+        "hidden_dim": int(cfg.embed_dim),
+        "num_queries": int(cfg.det_num_queries),
+        "decoder_layers": int(cfg.det_decoder_layers),
+        "num_heads": int(cfg.det_num_heads),
+        "ff_dim": int(cfg.det_ff_dim),
+        "dropout": float(cfg.det_dropout),
+        "image_backbone": str(cfg.image_backbone),
+        "image_size": int(cfg.image_size),
+    }
+
+
 def detection_collate_fn(batch):
     images = torch.stack([sample[0] for sample in batch], dim=0)
     targets = []
@@ -390,6 +434,11 @@ def train(
 
     epochs = 2 if fast else cfg.epochs
     batch_size = min(cfg.batch_size, 8) if fast else cfg.batch_size
+    clip_init_path, clip_init_source = _resolve_clip_init_path(clip_init)
+    if clip_init_path is not None:
+        print(f"Using CLIP init checkpoint ({clip_init_source}): {clip_init_path}")
+    else:
+        print("CLIP init checkpoint: none")
 
     train_ds, val_ds, train_split, val_split = build_datasets()
 
@@ -429,6 +478,7 @@ def train(
     if num_classes <= 0:
         num_classes = infer_num_classes(base_ds)
     print(f"Detected num_classes={num_classes}")
+    model_cfg = _model_config_payload()
 
     run_id = make_run_id(
         prefix="detect_fast" if fast else "detect",
@@ -442,6 +492,8 @@ def train(
         "fast": fast,
         "subset": subset,
         "clip_init_arg": clip_init,
+        "clip_init_resolved": clip_init_path,
+        "clip_init_source": clip_init_source,
         "train_split": train_split,
         "val_split": val_split,
         "requested_device": requested_device,
@@ -449,6 +501,7 @@ def train(
         "resolved_epochs": epochs,
         "resolved_batch_size": batch_size,
         "num_classes": num_classes,
+        "model_config": model_cfg,
     }
     logger.log_config(config_payload)
 
@@ -524,7 +577,6 @@ def train(
         image_pretrained=cfg.image_pretrained,
     ).to(device)
 
-    clip_init_path = clip_init if clip_init is not None else cfg.clip_init_checkpoint
     if clip_init_path:
         load_image_encoder_from_clip_checkpoint(
             detector_model=model,
@@ -692,6 +744,7 @@ def train(
                             "model_state": eval_model.state_dict(),
                             "ema_used_for_eval": bool(ema),
                             "num_classes": num_classes,
+                            "model_config": model_cfg,
                             "epoch": epoch + 1,
                             "val_loss": val_avg,
                         },
@@ -708,6 +761,7 @@ def train(
                             "model_state": eval_model.state_dict(),
                             "ema_used_for_eval": bool(ema),
                             "num_classes": num_classes,
+                            "model_config": model_cfg,
                             "epoch": epoch + 1,
                             "map": map_val,
                             "map50": map50,
@@ -726,6 +780,7 @@ def train(
                     "optimizer_state": optimizer.state_dict(),
                     "scheduler_state": scheduler.state_dict(),
                     "num_classes": num_classes,
+                    "model_config": model_cfg,
                     "train_loss": avg_train,
                     "val_loss": val_avg,
                     "map": map_val,
@@ -757,6 +812,7 @@ def train(
             {
                 "model_state": final_model.state_dict(),
                 "num_classes": num_classes,
+                "model_config": model_cfg,
                 "ema_used_for_eval": bool(ema),
             },
             final_name,
@@ -820,6 +876,10 @@ def apply_cli_overrides(args):
         cfg.image_pretrained = True
     elif args.no_image_pretrained:
         cfg.image_pretrained = False
+    if args.auto_clip_init:
+        cfg.auto_clip_init = True
+    if args.no_auto_clip_init:
+        cfg.auto_clip_init = False
 
     if args.seed is not None:
         cfg.seed = args.seed
@@ -886,6 +946,8 @@ if __name__ == "__main__":
     p.add_argument("--fast", action="store_true", help="run a small quick training")
     p.add_argument("--subset", type=int, default=None, help="limit train samples")
     p.add_argument("--clip-init", type=str, default=None, help="optional CLIP checkpoint to initialize image encoder")
+    p.add_argument("--auto-clip-init", action="store_true", help="force-enable auto CLIP-init discovery")
+    p.add_argument("--no-auto-clip-init", action="store_true", help="disable auto CLIP-init discovery")
     p.add_argument("--tag", type=str, default=None, help="optional experiment tag for run/checkpoint naming")
     p.add_argument("--summary-out", type=str, default=None, help="optional JSON path for writing run summary")
 

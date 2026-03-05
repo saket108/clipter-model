@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import torch
 from PIL import Image, ImageDraw
@@ -96,19 +96,53 @@ def infer_num_classes_from_state(state_dict: dict) -> int:
     raise KeyError("Could not infer num_classes from checkpoint state_dict.")
 
 
-def load_checkpoint(checkpoint_path: Path, device: torch.device) -> Tuple[dict, int]:
+def _normalize_model_config(raw_cfg: Optional[dict]) -> Dict[str, object]:
+    out: Dict[str, object] = {
+        "hidden_dim": int(cfg.embed_dim),
+        "num_queries": int(cfg.det_num_queries),
+        "decoder_layers": int(cfg.det_decoder_layers),
+        "num_heads": int(cfg.det_num_heads),
+        "ff_dim": int(cfg.det_ff_dim),
+        "dropout": float(cfg.det_dropout),
+        "image_backbone": str(cfg.image_backbone),
+        "image_size": int(cfg.image_size),
+    }
+    if not isinstance(raw_cfg, dict):
+        return out
+    if "hidden_dim" in raw_cfg:
+        out["hidden_dim"] = int(raw_cfg["hidden_dim"])
+    if "num_queries" in raw_cfg:
+        out["num_queries"] = int(raw_cfg["num_queries"])
+    if "decoder_layers" in raw_cfg:
+        out["decoder_layers"] = int(raw_cfg["decoder_layers"])
+    if "num_heads" in raw_cfg:
+        out["num_heads"] = int(raw_cfg["num_heads"])
+    if "ff_dim" in raw_cfg:
+        out["ff_dim"] = int(raw_cfg["ff_dim"])
+    if "dropout" in raw_cfg:
+        out["dropout"] = float(raw_cfg["dropout"])
+    if "image_backbone" in raw_cfg:
+        out["image_backbone"] = str(raw_cfg["image_backbone"])
+    if "image_size" in raw_cfg:
+        out["image_size"] = int(raw_cfg["image_size"])
+    return out
+
+
+def load_checkpoint(checkpoint_path: Path, device: torch.device) -> Tuple[dict, int, Dict[str, object]]:
     raw = torch.load(checkpoint_path, map_location=device)
     if isinstance(raw, dict) and "model_state" in raw:
         state = raw["model_state"]
         num_classes = int(raw.get("num_classes", -1))
         if num_classes <= 0:
             num_classes = infer_num_classes_from_state(state)
-        return state, num_classes
+        model_cfg = _normalize_model_config(raw.get("model_config"))
+        return state, num_classes, model_cfg
 
     if isinstance(raw, dict):
         state = raw
         num_classes = infer_num_classes_from_state(state)
-        return state, num_classes
+        model_cfg = _normalize_model_config(None)
+        return state, num_classes, model_cfg
 
     raise ValueError("Unsupported checkpoint format.")
 
@@ -202,24 +236,24 @@ def main():
     if not checkpoint_path.exists():
         raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
 
-    state_dict, num_classes = load_checkpoint(checkpoint_path, device)
+    state_dict, num_classes, model_cfg = load_checkpoint(checkpoint_path, device)
     print(f"Loaded checkpoint: {checkpoint_path} (num_classes={num_classes})")
 
     model = LightDETR(
         num_classes=num_classes,
-        hidden_dim=cfg.embed_dim,
-        num_queries=cfg.det_num_queries,
-        decoder_layers=cfg.det_decoder_layers,
-        num_heads=cfg.det_num_heads,
-        ff_dim=cfg.det_ff_dim,
-        dropout=cfg.det_dropout,
-        image_backbone=cfg.image_backbone,
+        hidden_dim=int(model_cfg["hidden_dim"]),
+        num_queries=int(model_cfg["num_queries"]),
+        decoder_layers=int(model_cfg["decoder_layers"]),
+        num_heads=int(model_cfg["num_heads"]),
+        ff_dim=int(model_cfg["ff_dim"]),
+        dropout=float(model_cfg["dropout"]),
+        image_backbone=str(model_cfg["image_backbone"]),
         image_pretrained=False,
     ).to(device)
     model.load_state_dict(state_dict, strict=True)
     model.eval()
 
-    image_size = args.image_size if args.image_size is not None else cfg.image_size
+    image_size = args.image_size if args.image_size is not None else int(model_cfg["image_size"])
     preprocess = T.Compose(
         [
             T.Resize((image_size, image_size)),

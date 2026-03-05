@@ -1,0 +1,52 @@
+{
+  "name": "strong_recipe_v1",
+  "description": "Single strong detector recipe for high-quality baseline training.",
+  "experiments": [
+    {
+      "name": "strong_recipe_v1",
+      "description": "ConvNeXt tiny + larger input + longer schedule + EMA + strict class checks.",
+      "use_clip_init": false,
+      "cli_args": [
+        "--epochs",
+        "80",
+        "--batch-size",
+        "8",
+        "--lr",
+        "8e-5",
+        "--weight-decay",
+        "1e-4",
+        "--warmup-epochs",
+        "5",
+        "--warmup-start-factor",
+        "0.1",
+        "--grad-clip-norm",
+        "1.0",
+        "--use-ema",
+        "--ema-decay",
+        "0.999",
+        "--num-queries",
+        "100",
+        "--decoder-layers",
+        "4",
+        "--ff-dim",
+        "768",
+        "--image-backbone",
+        "convnext_tiny",
+        "--image-pretrained",
+        "--embed-dim",
+        "384",
+        "--image-size",
+        "320",
+        "--strict-class-check",
+        "--train-augment",
+        "--auto-clip-init",
+        "--freeze-backbone-epochs",
+        "3",
+        "--seed",
+        "42",
+        "--tag",
+        "strong_recipe_v1"
+      ]
+    }
+  ]
+}

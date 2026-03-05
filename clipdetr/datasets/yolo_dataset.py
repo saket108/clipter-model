@@ -104,11 +104,17 @@ class YOLODataset(Dataset):
 
             self.num_classes = len(self.class_map)
 
+        self._use_default_transform = transform is None
         if transform is None:
-            tfms = [T.Resize((image_size, image_size))]
-            if self.augment:
-                # Photometric augmentation only; boxes remain unchanged.
-                tfms.extend(
+            self.transform = T.Compose(
+                [
+                    T.Resize((image_size, image_size)),
+                    T.ToTensor(),
+                    T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+                ]
+            )
+            self.photometric_aug = (
+                T.Compose(
                     [
                         T.ColorJitter(
                             brightness=0.2,
@@ -119,15 +125,12 @@ class YOLODataset(Dataset):
                         T.RandomGrayscale(p=0.05),
                     ]
                 )
-            tfms.extend(
-                [
-                    T.ToTensor(),
-                    T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
-                ]
+                if self.augment
+                else None
             )
-            self.transform = T.Compose(tfms)
         else:
             self.transform = transform
+            self.photometric_aug = None
 
     def _resolve_annotations_file(self, annotations_file: Optional[str]) -> Optional[Path]:
         candidates: List[Path] = []
@@ -302,6 +305,111 @@ class YOLODataset(Dataset):
         name = self.class_map.get(cls0, f"class_{cls0}")
         return f"a photo of a {name}"
 
+    @staticmethod
+    def _boxes_cxcywh_to_xyxy_abs(boxes_rel: torch.Tensor, img_w: int, img_h: int) -> torch.Tensor:
+        if boxes_rel.numel() == 0:
+            return torch.zeros((0, 4), dtype=torch.float32)
+        boxes = boxes_rel.float()
+        cx = boxes[:, 0] * float(img_w)
+        cy = boxes[:, 1] * float(img_h)
+        bw = boxes[:, 2] * float(img_w)
+        bh = boxes[:, 3] * float(img_h)
+        x1 = cx - 0.5 * bw
+        y1 = cy - 0.5 * bh
+        x2 = cx + 0.5 * bw
+        y2 = cy + 0.5 * bh
+        return torch.stack([x1, y1, x2, y2], dim=-1)
+
+    @staticmethod
+    def _boxes_xyxy_abs_to_cxcywh_rel(boxes_abs: torch.Tensor, img_w: int, img_h: int) -> torch.Tensor:
+        if boxes_abs.numel() == 0:
+            return torch.zeros((0, 4), dtype=torch.float32)
+        boxes = boxes_abs.float()
+        x1 = boxes[:, 0]
+        y1 = boxes[:, 1]
+        x2 = boxes[:, 2]
+        y2 = boxes[:, 3]
+        w = (x2 - x1).clamp(min=0.0)
+        h = (y2 - y1).clamp(min=0.0)
+        cx = x1 + 0.5 * w
+        cy = y1 + 0.5 * h
+        return torch.stack(
+            [
+                cx / float(img_w),
+                cy / float(img_h),
+                w / float(img_w),
+                h / float(img_h),
+            ],
+            dim=-1,
+        ).clamp(0.0, 1.0)
+
+    def _random_horizontal_flip(self, img: Image.Image, boxes_rel: torch.Tensor, p: float = 0.5):
+        if torch.rand(1).item() >= p:
+            return img, boxes_rel
+        out_img = img.transpose(Image.FLIP_LEFT_RIGHT)
+        if boxes_rel.numel() == 0:
+            return out_img, boxes_rel
+        out_boxes = boxes_rel.clone()
+        out_boxes[:, 0] = 1.0 - out_boxes[:, 0]
+        return out_img, out_boxes
+
+    def _random_resized_crop(
+        self,
+        img: Image.Image,
+        boxes_rel: torch.Tensor,
+        class_ids: torch.Tensor,
+        p: float = 0.5,
+        min_scale: float = 0.7,
+    ):
+        if boxes_rel.numel() == 0 or torch.rand(1).item() >= p:
+            return img, boxes_rel, class_ids
+
+        img_w, img_h = img.size
+        scale = float(torch.empty(1).uniform_(min_scale, 1.0).item())
+        crop_w = max(2, int(round(img_w * scale)))
+        crop_h = max(2, int(round(img_h * scale)))
+        if crop_w >= img_w or crop_h >= img_h:
+            return img, boxes_rel, class_ids
+
+        left = int(torch.randint(0, img_w - crop_w + 1, (1,)).item())
+        top = int(torch.randint(0, img_h - crop_h + 1, (1,)).item())
+
+        boxes_abs = self._boxes_cxcywh_to_xyxy_abs(boxes_rel, img_w, img_h)
+        boxes_abs[:, [0, 2]] = boxes_abs[:, [0, 2]] - float(left)
+        boxes_abs[:, [1, 3]] = boxes_abs[:, [1, 3]] - float(top)
+        boxes_abs[:, [0, 2]] = boxes_abs[:, [0, 2]].clamp(0.0, float(crop_w))
+        boxes_abs[:, [1, 3]] = boxes_abs[:, [1, 3]].clamp(0.0, float(crop_h))
+
+        widths = boxes_abs[:, 2] - boxes_abs[:, 0]
+        heights = boxes_abs[:, 3] - boxes_abs[:, 1]
+        keep = (widths > 1.0) & (heights > 1.0)
+        if not bool(keep.any()):
+            return img, boxes_rel, class_ids
+
+        cropped_img = img.crop((left, top, left + crop_w, top + crop_h))
+        cropped_boxes_rel = self._boxes_xyxy_abs_to_cxcywh_rel(
+            boxes_abs[keep],
+            img_w=crop_w,
+            img_h=crop_h,
+        )
+        cropped_class_ids = class_ids[keep]
+        return cropped_img, cropped_boxes_rel, cropped_class_ids
+
+    def _apply_train_augment(
+        self, img: Image.Image, boxes_rel: torch.Tensor, class_ids: torch.Tensor
+    ):
+        img_aug, boxes_aug, class_ids_aug = self._random_resized_crop(
+            img,
+            boxes_rel,
+            class_ids,
+            p=0.5,
+            min_scale=0.7,
+        )
+        img_aug, boxes_aug = self._random_horizontal_flip(img_aug, boxes_aug, p=0.5)
+        if self.photometric_aug is not None:
+            img_aug = self.photometric_aug(img_aug)
+        return img_aug, boxes_aug, class_ids_aug
+
     def __getitem__(self, idx: int):
         if self.annotation_format == "yolo":
             img_path = self.files[idx]
@@ -313,6 +421,9 @@ class YOLODataset(Dataset):
             img_path = record["image_path"]
             img = Image.open(img_path).convert("RGB")
             boxes_rel, class_ids = self._read_coco_labels(record, img.size)
+
+        if self.augment and self._use_default_transform:
+            img, boxes_rel, class_ids = self._apply_train_augment(img, boxes_rel, class_ids)
 
         img_t = self.transform(img)
         caption = self._synthesize_caption(class_ids)
