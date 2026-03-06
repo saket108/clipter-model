@@ -64,6 +64,9 @@ class Config:
     eval_conf_thres: float = 0.001                     # low threshold for mAP eval
     eval_top_k: int = 100
     eval_nms_iou: float = 0.0
+    tile_stitch_eval: bool = False
+    tile_stitch_nms_iou: float = 0.5
+    tile_stitch_gt_dedup_iou: float = 0.9
     experiments_root: str = "experiments"
     class_stats_max_samples: int | None = None
     strict_class_check: bool = True

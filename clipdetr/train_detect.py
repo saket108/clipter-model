@@ -724,6 +724,9 @@ def train(
                     conf_thres=cfg.eval_conf_thres,
                     top_k=cfg.eval_top_k,
                     nms_iou=cfg.eval_nms_iou,
+                    tile_stitch=bool(cfg.tile_stitch_eval),
+                    tile_stitch_nms_iou=float(cfg.tile_stitch_nms_iou),
+                    tile_stitch_gt_dedup_iou=float(cfg.tile_stitch_gt_dedup_iou),
                 )
                 map_val = float(map_metrics["map"])
                 map50 = float(map_metrics["map50"])
@@ -923,6 +926,14 @@ def apply_cli_overrides(args):
         cfg.eval_top_k = args.eval_top_k
     if args.eval_nms_iou is not None:
         cfg.eval_nms_iou = args.eval_nms_iou
+    if args.tile_stitch_eval:
+        cfg.tile_stitch_eval = True
+    if args.no_tile_stitch_eval:
+        cfg.tile_stitch_eval = False
+    if args.tile_stitch_nms_iou is not None:
+        cfg.tile_stitch_nms_iou = args.tile_stitch_nms_iou
+    if args.tile_stitch_gt_dedup_iou is not None:
+        cfg.tile_stitch_gt_dedup_iou = args.tile_stitch_gt_dedup_iou
 
     if args.experiments_root is not None:
         cfg.experiments_root = args.experiments_root
@@ -991,6 +1002,10 @@ if __name__ == "__main__":
     p.add_argument("--eval-conf-thres", type=float, default=None)
     p.add_argument("--eval-top-k", type=int, default=None)
     p.add_argument("--eval-nms-iou", type=float, default=None)
+    p.add_argument("--tile-stitch-eval", action="store_true", help="stitch tiled validation predictions back to original-image coordinates")
+    p.add_argument("--no-tile-stitch-eval", action="store_true", help="disable tiled validation stitching even if the dataset uses tiles")
+    p.add_argument("--tile-stitch-nms-iou", type=float, default=None, help="classwise NMS IoU used after tile stitching")
+    p.add_argument("--tile-stitch-gt-dedup-iou", type=float, default=None, help="IoU threshold used to deduplicate overlapping tiled GT boxes")
 
     p.add_argument("--experiments-root", type=str, default=None)
     p.add_argument("--class-stats-max-samples", type=int, default=None)

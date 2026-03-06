@@ -1,0 +1,7 @@
+# Colab-specific dependency set for CLIPTER detector training.
+# Torch/torchvision are expected to come from the Colab runtime GPU image.
+numpy>=1.26,<3
+Pillow>=10,<13
+PyYAML>=6,<7
+tqdm>=4.66,<5
+scipy>=1.13,<1.17

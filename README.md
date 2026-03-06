@@ -8,10 +8,16 @@ Lightweight CLIP + DETR training/inference project.
 python -m venv .venv
 .venv\Scripts\activate
 pip install -U pip
-pip install torch torchvision tqdm pyyaml pillow scipy
+pip install -r requirements.txt
 ```
 
-If you use extra dependencies in your local code, install those as needed.
+For Colab, use the dedicated bootstrap instead of ad-hoc installs:
+
+```bash
+bash scripts/colab_bootstrap.sh
+```
+
+CLIPTER detector training does not require the OpenAI `clip` package. That AeroMixer failure path is not part of this repo's detector stack.
 
 ## 2) Dataset layout (local only)
 
@@ -44,6 +50,52 @@ python dataset_smoke.py
 ```powershell
 python clipdetr/train_detect.py --fast --subset 512
 ```
+
+Colab instructions are in [docs/COLAB.md](docs/COLAB.md).
+
+One-command end-to-end pipeline (recommended):
+
+```powershell
+python scripts/pipeline.py `
+  --mode run `
+  --data "C:\path\to\dataset\data.yaml" `
+  --output-dir experiments/pipeline_runs/run1 `
+  --device auto `
+  --epochs 80 `
+  --batch-size 8 `
+  --image-backbone convnext_tiny `
+  --image-size 320 `
+  --embed-dim 384 `
+  --tune-thresholds `
+  --benchmark `
+  --yolo-metrics experiments/eval_yolo.json `
+  --detr-metrics experiments/eval_detr.json
+```
+
+This runs train -> eval -> optional threshold tuning -> optional baseline benchmark.
+It writes a reproducibility manifest to `<output-dir>/pipeline_manifest.json`.
+
+For tiny-object datasets, enable tiled train/eval with stitched full-image metrics:
+
+```powershell
+python scripts/pipeline.py `
+  --mode run `
+  --data "C:\path\to\dataset\data.yaml" `
+  --output-dir experiments/pipeline_runs/run_tiles `
+  --device auto `
+  --epochs 80 `
+  --batch-size 8 `
+  --image-backbone convnext_tiny `
+  --image-size 320 `
+  --embed-dim 384 `
+  --tile-size 640 `
+  --tile-overlap 0.2 `
+  --tile-min-cover 0.35 `
+  --tile-stitch-eval `
+  --tune-thresholds
+```
+
+The pipeline builds a tiled dataset under `<output-dir>/prepared/`, trains on tiles, and stitches tiled validation predictions back into original-image coordinates for final metrics.
 
 YOLO-style single entrypoint (from `data.yaml`):
 
@@ -157,6 +209,7 @@ python clipdetr/utils/tune_detect_thresholds.py `
   --nms-grid 0.0,0.3,0.5 `
   --topk-grid 50,100 `
   --optimize map `
+  --tile-stitch-eval `
   --output-json experiments/threshold_sweeps/best_thresholds.json
 ```
 
@@ -297,3 +350,34 @@ Notes:
 - The splitter can auto-detect source layout (`<root>/images` or `<root>/<split>/images`).
 - It stratifies by primary class by default.
 - It writes/updates `data.yaml` in the output root unless `--no-write-yaml` is set.
+
+## 15) Unified baseline comparison (CLIPTER vs YOLO vs DETR)
+
+Use one canonical CSV/JSON report format across different model families:
+
+```powershell
+python scripts/run_baseline_benchmarks.py `
+  --dataset aircraft_damage_v2_2 `
+  --split valid `
+  --clipter-metrics experiments/eval_clipter.json `
+  --yolo-metrics experiments/eval_yolo.json `
+  --detr-metrics experiments/eval_detr.json `
+  --summary-csv reports/baseline_benchmarks.csv `
+  --output-json reports/baseline_benchmarks.json
+```
+
+You can also pass `--clipter-cmd`, `--yolo-cmd`, `--detr-cmd` to run and parse in one step.
+If you use `scripts/pipeline.py --benchmark`, CLIPTER metrics path is filled automatically from pipeline eval output.
+
+## 16) Competitive gap plan
+
+Gap analysis and end-to-end execution plan (where others are strong/weak and how CLIPTER should respond):
+
+- `docs/COMPETITIVE_GAP_PLAN.md`
+
+## 17) Archived utilities
+
+Legacy helpers were moved to keep active paths clean:
+
+- `clipdetr/utils/archive/create_val_split.py`
+- `clipdetr/utils/archive/print_split_stats.py`

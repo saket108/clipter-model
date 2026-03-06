@@ -254,6 +254,11 @@ class YOLODataset(Dataset):
             return len(self.files)
         return len(self.records)
 
+    def get_image_path(self, idx: int) -> Path:
+        if self.annotation_format == "yolo":
+            return self.files[idx]
+        return self.records[idx]["image_path"]
+
     def _read_yolo_labels(self, label_path: Path) -> Tuple[torch.Tensor, torch.Tensor]:
         boxes = []
         class_ids = []

@@ -83,6 +83,12 @@ def main():
         help="which metric to maximize when choosing best threshold tuple",
     )
     p.add_argument("--output-json", type=str, default=None)
+    tile_group = p.add_mutually_exclusive_group()
+    tile_group.add_argument("--tile-stitch-eval", dest="tile_stitch_eval", action="store_true")
+    tile_group.add_argument("--no-tile-stitch-eval", dest="tile_stitch_eval", action="store_false")
+    p.set_defaults(tile_stitch_eval=None)
+    p.add_argument("--tile-stitch-nms-iou", type=float, default=None)
+    p.add_argument("--tile-stitch-gt-dedup-iou", type=float, default=None)
     args = p.parse_args()
 
     if args.device == "auto":
@@ -103,6 +109,12 @@ def main():
         eval_detect.cfg.val_split = args.val_split
     if args.num_workers is not None:
         eval_detect.cfg.num_workers = args.num_workers
+    if args.tile_stitch_eval is not None:
+        eval_detect.cfg.tile_stitch_eval = bool(args.tile_stitch_eval)
+    if args.tile_stitch_nms_iou is not None:
+        eval_detect.cfg.tile_stitch_nms_iou = float(args.tile_stitch_nms_iou)
+    if args.tile_stitch_gt_dedup_iou is not None:
+        eval_detect.cfg.tile_stitch_gt_dedup_iou = float(args.tile_stitch_gt_dedup_iou)
 
     checkpoint_path = Path(args.checkpoint)
     if not checkpoint_path.exists():
@@ -111,6 +123,9 @@ def main():
     conf_grid = _parse_float_list(args.conf_grid)
     nms_grid = _parse_float_list(args.nms_grid)
     topk_grid = _parse_int_list(args.topk_grid)
+    tile_stitch_eval = bool(eval_detect.cfg.tile_stitch_eval)
+    tile_stitch_nms_iou = float(eval_detect.cfg.tile_stitch_nms_iou)
+    tile_stitch_gt_dedup_iou = float(eval_detect.cfg.tile_stitch_gt_dedup_iou)
 
     state_dict, num_classes, model_cfg = _load_checkpoint(checkpoint_path, device)
     if args.image_size is not None:
@@ -156,6 +171,9 @@ def main():
             conf_thres=float(conf_thres),
             top_k=int(top_k),
             nms_iou=float(nms_iou),
+            tile_stitch=tile_stitch_eval,
+            tile_stitch_nms_iou=tile_stitch_nms_iou,
+            tile_stitch_gt_dedup_iou=tile_stitch_gt_dedup_iou,
         )
 
         row = {
