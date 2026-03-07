@@ -117,6 +117,7 @@ def main():
         image_backbone=str(model_cfg["image_backbone"]),
         image_pretrained=False,
         use_multiscale_memory=bool(model_cfg.get("use_multiscale_memory", False)),
+        use_multiscale_neck=bool(model_cfg.get("use_multiscale_neck", False)),
         multiscale_levels=int(model_cfg.get("multiscale_levels", 3)),
     ).to(device)
     model.load_state_dict(state_dict, strict=True)

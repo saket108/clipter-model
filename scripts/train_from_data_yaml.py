@@ -73,6 +73,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--fast", action="store_true")
     p.add_argument("--subset", type=int, default=None)
     p.add_argument("--use-multiscale-memory", action="store_true")
+    p.add_argument("--use-multiscale-neck", action="store_true")
     p.add_argument("--multiscale-levels", type=int, default=None)
     p.add_argument("--dry-run", action="store_true", help="Print resolved command and exit.")
     strict_group = p.add_mutually_exclusive_group()
@@ -89,6 +90,8 @@ def main() -> int:
         passthrough = passthrough[1:]
 
     data_yaml = Path(args.data).expanduser().resolve()
+    if args.use_multiscale_memory and args.use_multiscale_neck:
+        raise ValueError("Use only one of --use-multiscale-memory or --use-multiscale-neck.")
     if not data_yaml.exists():
         raise FileNotFoundError(f"data.yaml not found: {data_yaml}")
     if not data_yaml.is_file():
@@ -162,6 +165,8 @@ def main() -> int:
         cmd.extend(["--subset", str(args.subset)])
     if args.use_multiscale_memory:
         cmd.append("--use-multiscale-memory")
+    if args.use_multiscale_neck:
+        cmd.append("--use-multiscale-neck")
     if args.multiscale_levels is not None:
         cmd.extend(["--multiscale-levels", str(args.multiscale_levels)])
     if args.strict_class_check is True:

@@ -81,6 +81,7 @@ def _collect_rows(experiments_root: Path) -> list[dict[str, Any]]:
             "det_ff_dim": cfg.get("det_ff_dim"),
             "det_dropout": cfg.get("det_dropout"),
             "det_use_multiscale_memory": cfg.get("det_use_multiscale_memory"),
+            "det_use_multiscale_neck": cfg.get("det_use_multiscale_neck"),
             "det_multiscale_levels": cfg.get("det_multiscale_levels"),
             "freeze_backbone_epochs": cfg.get("freeze_backbone_epochs"),
         }
@@ -185,6 +186,7 @@ def main() -> None:
         "det_ff_dim",
         "det_dropout",
         "det_use_multiscale_memory",
+        "det_use_multiscale_neck",
         "det_multiscale_levels",
         "freeze_backbone_epochs",
     ]

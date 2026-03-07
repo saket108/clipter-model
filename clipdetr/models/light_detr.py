@@ -2,6 +2,7 @@
 import torch
 import torch.nn as nn
 
+from .feature_neck import LightweightFPNNeck
 from .image_encoder import ImageEncoder
 
 
@@ -41,13 +42,19 @@ class LightDETR(nn.Module):
         image_backbone: str = "mobilenet_v3_small",
         image_pretrained: bool = False,
         use_multiscale_memory: bool = False,
+        use_multiscale_neck: bool = False,
         multiscale_levels: int = 3,
     ):
         super().__init__()
         self.num_classes = num_classes
         self.num_queries = num_queries
         self.use_multiscale_memory = bool(use_multiscale_memory)
+        self.use_multiscale_neck = bool(use_multiscale_neck)
         self.multiscale_levels = int(multiscale_levels)
+        if self.use_multiscale_memory and self.use_multiscale_neck:
+            raise ValueError(
+                "use_multiscale_memory and use_multiscale_neck are mutually exclusive."
+            )
 
         self.image_encoder = ImageEncoder(
             backbone_name=image_backbone,
@@ -55,6 +62,15 @@ class LightDETR(nn.Module):
             output_dim=hidden_dim,
             multiscale_levels=self.multiscale_levels if self.use_multiscale_memory else 0,
         )
+        self.multiscale_neck = None
+        self.neck_level_embed = None
+        if self.use_multiscale_neck:
+            stage_specs = self.image_encoder.get_stage_specs(levels=self.multiscale_levels)
+            self.multiscale_neck = LightweightFPNNeck(
+                in_channels=[channels for _, _, channels in stage_specs],
+                out_channels=hidden_dim,
+            )
+            self.neck_level_embed = nn.Parameter(torch.zeros(len(stage_specs), hidden_dim))
         self.memory_norm = nn.LayerNorm(hidden_dim)
 
         decoder_layer = nn.TransformerDecoderLayer(
@@ -71,12 +87,28 @@ class LightDETR(nn.Module):
         self.class_embed = nn.Linear(hidden_dim, num_classes + 1)  # +1 is no-object class
         self.bbox_embed = MLP(hidden_dim, hidden_dim, 4, num_layers=3)
 
+    def _flatten_neck_features(self, feature_maps: list[torch.Tensor]) -> torch.Tensor:
+        tokens_per_level = []
+        for level_idx, feature_map in enumerate(feature_maps):
+            tokens = feature_map.flatten(2).transpose(1, 2)
+            tokens = tokens + self.neck_level_embed[level_idx].view(1, 1, -1)
+            tokens_per_level.append(tokens)
+        return torch.cat(tokens_per_level, dim=1)
+
     def forward(self, images: torch.Tensor):
-        memory = self.image_encoder(
-            images,
-            return_patch_tokens=True,
-            use_multiscale_tokens=self.use_multiscale_memory,
-        )  # [B, N, D]
+        if self.use_multiscale_neck:
+            stage_maps = self.image_encoder.extract_stage_features(
+                images,
+                levels=self.multiscale_levels,
+            )
+            fused_maps = self.multiscale_neck(list(stage_maps.values()))
+            memory = self._flatten_neck_features(fused_maps)
+        else:
+            memory = self.image_encoder(
+                images,
+                return_patch_tokens=True,
+                use_multiscale_tokens=self.use_multiscale_memory,
+            )  # [B, N, D]
         memory = self.memory_norm(memory)
 
         bs = memory.size(0)

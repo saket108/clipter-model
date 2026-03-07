@@ -205,6 +205,7 @@ def _model_config_payload():
         "image_backbone": str(cfg.image_backbone),
         "image_size": int(cfg.image_size),
         "use_multiscale_memory": bool(cfg.det_use_multiscale_memory),
+        "use_multiscale_neck": bool(cfg.det_use_multiscale_neck),
         "multiscale_levels": int(cfg.det_multiscale_levels),
     }
 
@@ -578,6 +579,7 @@ def train(
         image_backbone=cfg.image_backbone,
         image_pretrained=cfg.image_pretrained,
         use_multiscale_memory=cfg.det_use_multiscale_memory,
+        use_multiscale_neck=cfg.det_use_multiscale_neck,
         multiscale_levels=cfg.det_multiscale_levels,
     ).to(device)
 
@@ -923,8 +925,14 @@ def apply_cli_overrides(args):
         cfg.det_ff_dim = args.ff_dim
     if args.use_multiscale_memory:
         cfg.det_use_multiscale_memory = True
+        cfg.det_use_multiscale_neck = False
     if args.no_use_multiscale_memory:
         cfg.det_use_multiscale_memory = False
+    if args.use_multiscale_neck:
+        cfg.det_use_multiscale_neck = True
+        cfg.det_use_multiscale_memory = False
+    if args.no_use_multiscale_neck:
+        cfg.det_use_multiscale_neck = False
     if args.multiscale_levels is not None:
         cfg.det_multiscale_levels = args.multiscale_levels
     if args.freeze_backbone_epochs is not None:
@@ -1008,6 +1016,8 @@ if __name__ == "__main__":
     p.add_argument("--ff-dim", type=int, default=None, help="override det_ff_dim")
     p.add_argument("--use-multiscale-memory", action="store_true", help="enable multi-scale backbone token fusion for the decoder")
     p.add_argument("--no-use-multiscale-memory", action="store_true", help="disable multi-scale backbone token fusion")
+    p.add_argument("--use-multiscale-neck", action="store_true", help="enable structured multi-scale feature fusion before decoder memory construction")
+    p.add_argument("--no-use-multiscale-neck", action="store_true", help="disable structured multi-scale feature fusion")
     p.add_argument("--multiscale-levels", type=int, default=None, help="number of backbone stages to fuse when multi-scale memory is enabled")
     p.add_argument("--det-dropout", type=float, default=None, help="override det_dropout")
     p.add_argument("--freeze-backbone-epochs", type=int, default=None)

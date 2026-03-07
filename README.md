@@ -228,7 +228,7 @@ This builds a tiled dataset under the pipeline output directory, trains on tiles
 
 ## Multi-Scale Architecture Experiment
 
-CLIPTER now supports an optional multi-scale decoder memory path. Use this when the baseline detects objects but localization is still weak.
+CLIPTER now supports an optional structured multi-scale neck path. Use this when the baseline detects objects but localization is still weak.
 
 ```powershell
 python scripts/pipeline.py `
@@ -241,7 +241,7 @@ python scripts/pipeline.py `
   --image-backbone convnext_tiny `
   --image-size 384 `
   --embed-dim 384 `
-  --use-multiscale-memory `
+  --use-multiscale-neck `
   --multiscale-levels 3 `
   --tune-thresholds
 ```

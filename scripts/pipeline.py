@@ -107,6 +107,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--fast", action="store_true")
     p.add_argument("--subset", type=int, default=None)
     p.add_argument("--use-multiscale-memory", action="store_true", help="enable multi-scale backbone token fusion in LightDETR")
+    p.add_argument("--use-multiscale-neck", action="store_true", help="enable structured multiscale feature fusion before decoder memory construction")
     p.add_argument("--multiscale-levels", type=int, default=3, help="number of backbone stages to fuse when multi-scale memory is enabled")
 
     strict_group = p.add_mutually_exclusive_group()
@@ -150,6 +151,8 @@ def _build_parser() -> argparse.ArgumentParser:
 
 def main() -> int:
     args = _build_parser().parse_args()
+    if args.use_multiscale_memory and args.use_multiscale_neck:
+        raise ValueError("Use only one of --use-multiscale-memory or --use-multiscale-neck.")
     root = _repo_root()
     input_data_yaml = Path(args.data).expanduser().resolve()
     if not input_data_yaml.exists():
@@ -296,6 +299,8 @@ def main() -> int:
         train_cmd.append("--no-strict-class-check")
     if args.use_multiscale_memory:
         train_cmd.extend(["--use-multiscale-memory", "--multiscale-levels", str(args.multiscale_levels)])
+    if args.use_multiscale_neck:
+        train_cmd.extend(["--use-multiscale-neck", "--multiscale-levels", str(args.multiscale_levels)])
     if effective_tile_stitch_eval:
         train_cmd.extend(
             [

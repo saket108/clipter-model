@@ -180,6 +180,7 @@ def _normalize_model_config(raw_cfg: dict | None) -> Dict[str, object]:
         "image_backbone": str(cfg.image_backbone),
         "image_size": int(cfg.image_size),
         "use_multiscale_memory": bool(cfg.det_use_multiscale_memory),
+        "use_multiscale_neck": bool(cfg.det_use_multiscale_neck),
         "multiscale_levels": int(cfg.det_multiscale_levels),
     }
     if not isinstance(raw_cfg, dict):
@@ -202,6 +203,8 @@ def _normalize_model_config(raw_cfg: dict | None) -> Dict[str, object]:
         out["image_size"] = int(raw_cfg["image_size"])
     if "use_multiscale_memory" in raw_cfg:
         out["use_multiscale_memory"] = bool(raw_cfg["use_multiscale_memory"])
+    if "use_multiscale_neck" in raw_cfg:
+        out["use_multiscale_neck"] = bool(raw_cfg["use_multiscale_neck"])
     if "multiscale_levels" in raw_cfg:
         out["multiscale_levels"] = int(raw_cfg["multiscale_levels"])
     return out
@@ -306,6 +309,7 @@ def main():
         image_backbone=str(model_cfg["image_backbone"]),
         image_pretrained=False,
         use_multiscale_memory=bool(model_cfg.get("use_multiscale_memory", False)),
+        use_multiscale_neck=bool(model_cfg.get("use_multiscale_neck", False)),
         multiscale_levels=int(model_cfg.get("multiscale_levels", 3)),
     ).to(device)
     model.load_state_dict(state_dict, strict=True)

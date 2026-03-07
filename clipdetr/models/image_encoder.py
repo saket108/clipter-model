@@ -1,3 +1,5 @@
+from collections import OrderedDict
+
 import torch
 import torch.nn as nn
 from torchvision.models import (
@@ -9,9 +11,9 @@ from torchvision.models import (
 
 
 class ImageEncoder(nn.Module):
-    _MULTISCALE_SPECS = {
-        "convnext_tiny": [(3, 192), (5, 384), (7, 768)],
-        "mobilenet_v3_small": [(3, 24), (8, 48), (12, 576)],
+    _STAGE_SPECS = {
+        "convnext_tiny": [("res3", 3, 192), ("res4", 5, 384), ("res5", 7, 768)],
+        "mobilenet_v3_small": [("res3", 3, 24), ("res4", 8, 48), ("res5", 12, 576)],
     }
 
     def __init__(
@@ -49,20 +51,43 @@ class ImageEncoder(nn.Module):
             else nn.Linear(self.backbone_out_dim, self.output_dim)
         )
         self.multiscale_specs = []
-        self.multiscale_indices = set()
         self.multiscale_projs = None
         self.level_embed = None
         if self.multiscale_levels > 0:
-            available = list(self._MULTISCALE_SPECS[self.backbone_name])
-            self.multiscale_specs = available[-self.multiscale_levels :]
-            self.multiscale_indices = {idx for idx, _ in self.multiscale_specs}
+            self.multiscale_specs = self.get_stage_specs(levels=self.multiscale_levels)
             self.multiscale_projs = nn.ModuleList(
                 [
-                    nn.Identity() if channels == self.output_dim else nn.Conv2d(channels, self.output_dim, kernel_size=1)
-                    for _, channels in self.multiscale_specs
+                    nn.Identity()
+                    if channels == self.output_dim
+                    else nn.Conv2d(channels, self.output_dim, kernel_size=1)
+                    for _, _, channels in self.multiscale_specs
                 ]
             )
             self.level_embed = nn.Parameter(torch.zeros(len(self.multiscale_specs), self.output_dim))
+
+    def get_stage_specs(self, levels: int | None = None):
+        available = list(self._STAGE_SPECS[self.backbone_name])
+        if levels is None or int(levels) <= 0 or int(levels) >= len(available):
+            return available
+        return available[-int(levels) :]
+
+    def _run_backbone(self, x: torch.Tensor, requested_specs: list[tuple[str, int, int]] | None = None):
+        requested_by_index = {}
+        if requested_specs:
+            requested_by_index = {int(idx): str(name) for name, idx, _ in requested_specs}
+
+        current = x
+        outputs: "OrderedDict[str, torch.Tensor]" = OrderedDict()
+        for idx, block in enumerate(self.features):
+            current = block(current)
+            if idx in requested_by_index:
+                outputs[requested_by_index[idx]] = current
+        return current, outputs
+
+    def extract_stage_features(self, x: torch.Tensor, levels: int | None = None):
+        stage_specs = self.get_stage_specs(levels=levels)
+        _, stage_outputs = self._run_backbone(x, requested_specs=stage_specs)
+        return stage_outputs
 
     def forward(self, x, return_patch_tokens: bool = True, use_multiscale_tokens: bool = False):
         """
@@ -71,12 +96,8 @@ class ImageEncoder(nn.Module):
         Otherwise returns a pooled vector [B, output_dim].
         """
         if return_patch_tokens and use_multiscale_tokens and self.multiscale_levels > 0:
-            current = x
-            collected = []
-            for idx, block in enumerate(self.features):
-                current = block(current)
-                if idx in self.multiscale_indices:
-                    collected.append(current)
+            stage_outputs = self.extract_stage_features(x, levels=self.multiscale_levels)
+            collected = list(stage_outputs.values())
 
             tokens_per_level = []
             for level_idx, (feature_map, projector) in enumerate(zip(collected, self.multiscale_projs)):
@@ -86,7 +107,7 @@ class ImageEncoder(nn.Module):
                 tokens_per_level.append(tokens)
             return torch.cat(tokens_per_level, dim=1)
 
-        features = self.features(x)  # [B, C, H', W']
+        features, _ = self._run_backbone(x)  # [B, C, H', W']
 
         if return_patch_tokens:
             # Flatten spatial dimensions into tokens -> [B, N, C]
