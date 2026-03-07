@@ -292,6 +292,7 @@ python clipdetr/utils/aggregate_detect_results.py `
 
 - [docs/COLAB.md](docs/COLAB.md): Colab setup and runtime guidance
 - [docs/COMPETITIVE_GAP_PLAN.md](docs/COMPETITIVE_GAP_PLAN.md): model comparison and improvement roadmap
+- [docs/DETECTOR_REDESIGN_PLAN.md](docs/DETECTOR_REDESIGN_PLAN.md): next detector iteration plan from the locked v3 baseline
 
 ## Repository Hygiene
 
