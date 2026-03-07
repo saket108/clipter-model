@@ -1,6 +1,7 @@
 """Lightweight DETR-style detector built on top of the project's image encoder."""
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from .feature_neck import LightweightFPNNeck
 from .image_encoder import ImageEncoder
@@ -64,6 +65,7 @@ class LightDETR(nn.Module):
         )
         self.multiscale_neck = None
         self.neck_level_embed = None
+        self.neck_pool_sizes: list[int] = []
         if self.use_multiscale_neck:
             stage_specs = self.image_encoder.get_stage_specs(levels=self.multiscale_levels)
             self.multiscale_neck = LightweightFPNNeck(
@@ -71,6 +73,7 @@ class LightDETR(nn.Module):
                 out_channels=hidden_dim,
             )
             self.neck_level_embed = nn.Parameter(torch.zeros(len(stage_specs), hidden_dim))
+            self.neck_pool_sizes = self._default_neck_pool_sizes(len(stage_specs))
         self.memory_norm = nn.LayerNorm(hidden_dim)
 
         decoder_layer = nn.TransformerDecoderLayer(
@@ -87,15 +90,25 @@ class LightDETR(nn.Module):
         self.class_embed = nn.Linear(hidden_dim, num_classes + 1)  # +1 is no-object class
         self.bbox_embed = MLP(hidden_dim, hidden_dim, 4, num_layers=3)
 
+    @staticmethod
+    def _default_neck_pool_sizes(levels: int) -> list[int]:
+        sizes = [8, 4, 2, 1]
+        if levels <= len(sizes):
+            return sizes[:levels]
+        while len(sizes) < levels:
+            sizes.append(1)
+        return sizes[:levels]
+
     def _flatten_neck_features(self, feature_maps: list[torch.Tensor]) -> torch.Tensor:
         tokens_per_level = []
-        for level_idx, feature_map in enumerate(feature_maps):
-            tokens = feature_map.flatten(2).transpose(1, 2)
+        for level_idx, (feature_map, pool_size) in enumerate(zip(feature_maps, self.neck_pool_sizes)):
+            pooled = F.adaptive_avg_pool2d(feature_map, output_size=(pool_size, pool_size))
+            tokens = pooled.flatten(2).transpose(1, 2)
             tokens = tokens + self.neck_level_embed[level_idx].view(1, 1, -1)
             tokens_per_level.append(tokens)
         return torch.cat(tokens_per_level, dim=1)
 
-    def forward(self, images: torch.Tensor):
+    def encode_images(self, images: torch.Tensor) -> torch.Tensor:
         if self.use_multiscale_neck:
             stage_maps = self.image_encoder.extract_stage_features(
                 images,
@@ -109,8 +122,10 @@ class LightDETR(nn.Module):
                 return_patch_tokens=True,
                 use_multiscale_tokens=self.use_multiscale_memory,
             )  # [B, N, D]
-        memory = self.memory_norm(memory)
+        return self.memory_norm(memory)
 
+    def forward(self, images: torch.Tensor):
+        memory = self.encode_images(images)
         bs = memory.size(0)
         query_embed = self.query_embed.weight.unsqueeze(0).expand(bs, -1, -1)
         tgt = torch.zeros_like(query_embed)

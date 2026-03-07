@@ -100,6 +100,30 @@ class TestMultiscaleDetector(unittest.TestCase):
         self.assertEqual(tuple(outputs["pred_logits"].shape), (2, 10, 6))
         self.assertEqual(tuple(outputs["pred_boxes"].shape), (2, 10, 4))
 
+    def test_light_detr_multiscale_neck_uses_bounded_memory_tokens(self):
+        from clipdetr.models.light_detr import LightDETR
+
+        model = LightDETR(
+            num_classes=5,
+            hidden_dim=64,
+            num_queries=10,
+            decoder_layers=1,
+            num_heads=4,
+            ff_dim=128,
+            dropout=0.0,
+            image_backbone="mobilenet_v3_small",
+            image_pretrained=False,
+            use_multiscale_neck=True,
+            multiscale_levels=3,
+        )
+        x = torch.randn(1, 3, 128, 128)
+        raw_stage_features = model.image_encoder.extract_stage_features(x, levels=3)
+        raw_token_count = sum(int(feature.shape[-2] * feature.shape[-1]) for feature in raw_stage_features.values())
+
+        memory = model.encode_images(x)
+        self.assertLess(int(memory.shape[1]), raw_token_count)
+        self.assertEqual(int(memory.shape[2]), 64)
+
 
 if __name__ == "__main__":
     unittest.main()
