@@ -72,6 +72,8 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--tag", type=str, default=None)
     p.add_argument("--fast", action="store_true")
     p.add_argument("--subset", type=int, default=None)
+    p.add_argument("--use-multiscale-memory", action="store_true")
+    p.add_argument("--multiscale-levels", type=int, default=None)
     p.add_argument("--dry-run", action="store_true", help="Print resolved command and exit.")
     strict_group = p.add_mutually_exclusive_group()
     strict_group.add_argument("--strict-class-check", dest="strict_class_check", action="store_true")
@@ -158,6 +160,10 @@ def main() -> int:
         cmd.append("--fast")
     if args.subset is not None:
         cmd.extend(["--subset", str(args.subset)])
+    if args.use_multiscale_memory:
+        cmd.append("--use-multiscale-memory")
+    if args.multiscale_levels is not None:
+        cmd.extend(["--multiscale-levels", str(args.multiscale_levels)])
     if args.strict_class_check is True:
         cmd.append("--strict-class-check")
     elif args.strict_class_check is False:

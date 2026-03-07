@@ -50,6 +50,8 @@ class Config:
     det_num_heads: int = 8
     det_ff_dim: int = 512
     det_dropout: float = 0.1
+    det_use_multiscale_memory: bool = False
+    det_multiscale_levels: int = 3
     det_cls_loss_coef: float = 1.0
     det_bbox_loss_coef: float = 5.0
     det_giou_loss_coef: float = 2.0

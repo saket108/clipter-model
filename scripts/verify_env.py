@@ -41,6 +41,8 @@ def _verify_detector() -> dict[str, object]:
         dropout=0.0,
         image_backbone="mobilenet_v3_small",
         image_pretrained=False,
+        use_multiscale_memory=True,
+        multiscale_levels=3,
     ).to(device)
     model.eval()
     x = torch.randn(2, 3, 224, 224, device=device)

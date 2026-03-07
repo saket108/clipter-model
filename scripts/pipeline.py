@@ -106,6 +106,8 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--fast", action="store_true")
     p.add_argument("--subset", type=int, default=None)
+    p.add_argument("--use-multiscale-memory", action="store_true", help="enable multi-scale backbone token fusion in LightDETR")
+    p.add_argument("--multiscale-levels", type=int, default=3, help="number of backbone stages to fuse when multi-scale memory is enabled")
 
     strict_group = p.add_mutually_exclusive_group()
     strict_group.add_argument("--strict-class-check", dest="strict_class_check", action="store_true")
@@ -292,6 +294,8 @@ def main() -> int:
         train_cmd.append("--strict-class-check")
     else:
         train_cmd.append("--no-strict-class-check")
+    if args.use_multiscale_memory:
+        train_cmd.extend(["--use-multiscale-memory", "--multiscale-levels", str(args.multiscale_levels)])
     if effective_tile_stitch_eval:
         train_cmd.extend(
             [

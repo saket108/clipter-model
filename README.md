@@ -181,6 +181,26 @@ python clipdetr/train_detect.py `
   --tag strong_recipe_v1
 ```
 
+Experimental multi-scale memory run (next architecture step):
+
+```powershell
+python scripts/pipeline.py `
+  --mode run `
+  --data "C:\path\to\final_dataset\data.yaml" `
+  --output-dir experiments/pipeline_runs/multiscale_v1 `
+  --device auto `
+  --epochs 80 `
+  --batch-size 8 `
+  --image-backbone convnext_tiny `
+  --image-size 384 `
+  --embed-dim 384 `
+  --use-multiscale-memory `
+  --multiscale-levels 3 `
+  --tune-thresholds
+```
+
+This fuses multiple backbone stages into the detector memory so CLIPTER can be compared directly against the previous single-scale baseline.
+
 ## 7) Optional CLIP pretrain -> detector init
 
 ```powershell

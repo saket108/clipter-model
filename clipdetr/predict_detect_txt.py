@@ -116,6 +116,8 @@ def main():
         dropout=float(model_cfg["dropout"]),
         image_backbone=str(model_cfg["image_backbone"]),
         image_pretrained=False,
+        use_multiscale_memory=bool(model_cfg.get("use_multiscale_memory", False)),
+        multiscale_levels=int(model_cfg.get("multiscale_levels", 3)),
     ).to(device)
     model.load_state_dict(state_dict, strict=True)
     model.eval()

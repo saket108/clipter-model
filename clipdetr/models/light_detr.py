@@ -40,15 +40,20 @@ class LightDETR(nn.Module):
         dropout: float = 0.1,
         image_backbone: str = "mobilenet_v3_small",
         image_pretrained: bool = False,
+        use_multiscale_memory: bool = False,
+        multiscale_levels: int = 3,
     ):
         super().__init__()
         self.num_classes = num_classes
         self.num_queries = num_queries
+        self.use_multiscale_memory = bool(use_multiscale_memory)
+        self.multiscale_levels = int(multiscale_levels)
 
         self.image_encoder = ImageEncoder(
             backbone_name=image_backbone,
             pretrained=image_pretrained,
             output_dim=hidden_dim,
+            multiscale_levels=self.multiscale_levels if self.use_multiscale_memory else 0,
         )
         self.memory_norm = nn.LayerNorm(hidden_dim)
 
@@ -67,7 +72,11 @@ class LightDETR(nn.Module):
         self.bbox_embed = MLP(hidden_dim, hidden_dim, 4, num_layers=3)
 
     def forward(self, images: torch.Tensor):
-        memory = self.image_encoder(images, return_patch_tokens=True)  # [B, N, D]
+        memory = self.image_encoder(
+            images,
+            return_patch_tokens=True,
+            use_multiscale_tokens=self.use_multiscale_memory,
+        )  # [B, N, D]
         memory = self.memory_norm(memory)
 
         bs = memory.size(0)
