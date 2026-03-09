@@ -1,11 +1,33 @@
-"""Dataset loader for YOLO TXT labels and optional COCO-style JSON annotations.
+"""Dataset loader for YOLO TXT labels and JSON annotations.
 
 Supported split structure:
   <root>/<split>/images/*.jpg
   <root>/<split>/labels/*.txt       # YOLO format: class x_center y_center w h
 
-Supported JSON format:
-  COCO dict with keys: images, annotations, categories
+Supported JSON formats:
+  - COCO dict with keys: images, annotations, categories
+  - Structured per-image JSON with keys:
+      {
+        "images": [
+          {
+            "file_name": "...",
+            "annotations": [
+              {
+                "category_name": "...",
+                "bounding_box_normalized": {
+                  "x_center": ...,
+                  "y_center": ...,
+                  "width": ...,
+                  "height": ...
+                },
+                "risk_assessment": {"severity_level": "..."},
+                "zone_estimation": "...",
+                "description": "..."
+              }
+            ]
+          }
+        ]
+      }
 
 Returns:
   (image_tensor, token_ids, boxes_rel, class_ids)
@@ -14,9 +36,10 @@ Where boxes_rel are normalized cx,cy,w,h in [0, 1].
 from __future__ import annotations
 
 import json
+import re
 from collections import defaultdict
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import torch
 from PIL import Image
@@ -37,12 +60,18 @@ class YOLODataset(Dataset):
         augment: bool = False,
         annotation_format: str = "auto",
         annotations_file: Optional[str] = None,
+        caption_style: str = "auto",
+        max_caption_annotations: int = 4,
     ):
         self.root = Path(root)
         self.split = split
         self.image_size = image_size
         self.tokenizer = tokenizer
         self.augment = augment
+        self.caption_style = str(caption_style or "auto").strip().lower()
+        self.max_caption_annotations = max(1, int(max_caption_annotations))
+        self.images_dir = self.root / self.split / "images"
+        self.labels_dir = self.root / self.split / "labels"
 
         if classes_file is not None:
             with open(classes_file, "r", encoding="utf-8") as f:
@@ -51,19 +80,28 @@ class YOLODataset(Dataset):
             classes = []
 
         self.classes = classes
-        self.annotation_format = annotation_format
+        self.annotation_format = str(annotation_format or "auto").strip().lower()
         self.annotations_file = self._resolve_annotations_file(annotations_file)
 
-        if self.annotation_format not in ("auto", "yolo", "coco_json"):
+        if self.annotation_format not in ("auto", "yolo", "coco_json", "structured_json"):
             raise ValueError(
-                "annotation_format must be one of ['auto', 'yolo', 'coco_json']"
+                "annotation_format must be one of "
+                "['auto', 'yolo', 'coco_json', 'structured_json']"
+            )
+        if self.caption_style not in (
+            "auto",
+            "synthetic",
+            "structured",
+            "first_sentence",
+            "raw_description",
+        ):
+            raise ValueError(
+                "caption_style must be one of "
+                "['auto', 'synthetic', 'structured', 'first_sentence', 'raw_description']"
             )
 
         if self.annotation_format == "auto":
-            self.annotation_format = "coco_json" if self.annotations_file is not None else "yolo"
-
-        self.images_dir = self.root / self.split / "images"
-        self.labels_dir = self.root / self.split / "labels"
+            self.annotation_format = self._resolve_auto_annotation_format()
 
         if self.annotation_format == "yolo":
             assert self.images_dir.exists(), f"Images dir not found: {self.images_dir}"
@@ -81,28 +119,24 @@ class YOLODataset(Dataset):
                 i: self.classes[i] if i < len(self.classes) else f"class_{i}"
                 for i in range(max(1, len(self.classes)))
             }
-        else:
+        elif self.annotation_format == "coco_json":
             if self.annotations_file is None:
                 raise FileNotFoundError(
                     "COCO JSON mode selected but no annotations_file could be resolved."
                 )
-            self.records, categories_by_id = self._load_coco_records(self.annotations_file)
+            self.records, self.class_map, self.num_classes = self._load_coco_records(
+                self.annotations_file
+            )
             self.files = None
-
-            all_cat_ids = sorted(categories_by_id.keys())
-            self.cat_id_to_contig = {cat_id: i for i, cat_id in enumerate(all_cat_ids)}
-
-            if len(self.classes) == 0:
-                self.classes = [categories_by_id[cid] for cid in all_cat_ids]
-
-            self.class_map = {}
-            for i, cid in enumerate(all_cat_ids):
-                if i < len(self.classes):
-                    self.class_map[i] = self.classes[i]
-                else:
-                    self.class_map[i] = categories_by_id.get(cid, f"class_{cid}")
-
-            self.num_classes = len(self.class_map)
+        else:
+            if self.annotations_file is None:
+                raise FileNotFoundError(
+                    "Structured JSON mode selected but no annotations_file could be resolved."
+                )
+            self.records, self.class_map, self.num_classes = self._load_structured_records(
+                self.annotations_file
+            )
+            self.files = None
 
         self._use_default_transform = transform is None
         if transform is None:
@@ -151,12 +185,54 @@ class YOLODataset(Dataset):
                 return c
         return None
 
-    def _resolve_image_path(self, file_name: str) -> Optional[Path]:
+    def _resolve_auto_annotation_format(self) -> str:
+        has_yolo_dirs = self.images_dir.exists() and self.labels_dir.exists()
+        detected_json_schema = self._detect_annotation_schema(self.annotations_file)
+
+        if self.tokenizer is not None and detected_json_schema is not None:
+            return detected_json_schema
+        if has_yolo_dirs:
+            return "yolo"
+        if detected_json_schema is not None:
+            return detected_json_schema
+        return "yolo"
+
+    @staticmethod
+    def _detect_annotation_schema(annotations_file: Optional[Path]) -> Optional[str]:
+        if annotations_file is None or not annotations_file.exists():
+            return None
+        try:
+            with open(annotations_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception:
+            return None
+
+        if not isinstance(data, dict):
+            return None
+
+        if isinstance(data.get("images"), list) and isinstance(data.get("annotations"), list):
+            return "coco_json"
+
+        images = data.get("images")
+        if isinstance(images, list) and any(
+            isinstance(item, dict) and isinstance(item.get("annotations"), list)
+            for item in images[: min(len(images), 8)]
+        ):
+            return "structured_json"
+
+        return None
+
+    def _resolve_image_path(self, file_name: str, split_name: Optional[str] = None) -> Optional[Path]:
         p = Path(file_name)
-        candidates = []
+        candidates: List[Path] = []
+
         if p.is_absolute():
             candidates.append(p)
         else:
+            split_token = str(split_name).strip() if split_name is not None else ""
+            if split_token:
+                split_images = self.root / split_token / "images"
+                candidates.extend([split_images / p, split_images / p.name])
             candidates.extend(
                 [
                     self.root / p,
@@ -171,6 +247,33 @@ class YOLODataset(Dataset):
             if c.exists():
                 return c
         return None
+
+    def _build_category_mapping(
+        self,
+        discovered_categories: Dict[int, str],
+    ) -> Tuple[Dict[int, int], Dict[int, str], int]:
+        if self.classes:
+            name_to_idx = {name: idx for idx, name in enumerate(self.classes)}
+            discovered_names = {name for name in discovered_categories.values() if name}
+            if discovered_names.issubset(name_to_idx):
+                raw_to_contig = {
+                    raw_id: name_to_idx[name]
+                    for raw_id, name in discovered_categories.items()
+                }
+                class_map = {idx: name for idx, name in enumerate(self.classes)}
+                return raw_to_contig, class_map, len(self.classes)
+            print(
+                "Warning: provided class names do not fully cover JSON categories; "
+                "falling back to categories discovered from annotations."
+            )
+
+        ordered_raw_ids = sorted(discovered_categories.keys())
+        raw_to_contig = {raw_id: idx for idx, raw_id in enumerate(ordered_raw_ids)}
+        class_map = {
+            idx: discovered_categories[raw_id]
+            for idx, raw_id in enumerate(ordered_raw_ids)
+        }
+        return raw_to_contig, class_map, len(class_map)
 
     def _load_coco_records(self, annotations_path: Path):
         with open(annotations_path, "r", encoding="utf-8") as f:
@@ -203,6 +306,7 @@ class YOLODataset(Dataset):
             if int(cat_id) not in categories_by_id:
                 categories_by_id[int(cat_id)] = f"class_{int(cat_id)}"
 
+        raw_to_contig, class_map, num_classes = self._build_category_mapping(categories_by_id)
         records = []
         missing_images = 0
 
@@ -218,36 +322,191 @@ class YOLODataset(Dataset):
                 continue
 
             boxes_abs = []
-            class_ids_raw = []
+            class_ids = []
             for bbox, cat_id in anns_by_img.get(int(img_id), []):
                 x, y, w, h = [float(v) for v in bbox[:4]]
                 if w <= 0 or h <= 0:
                     continue
                 boxes_abs.append([x, y, w, h])
-                class_ids_raw.append(int(cat_id))
+                class_ids.append(raw_to_contig.get(int(cat_id), 0))
 
-            if len(boxes_abs) == 0:
-                boxes_t = torch.zeros((0, 4), dtype=torch.float32)
-            else:
-                boxes_t = torch.tensor(boxes_abs, dtype=torch.float32)
+            boxes_t = (
+                torch.tensor(boxes_abs, dtype=torch.float32)
+                if boxes_abs
+                else torch.zeros((0, 4), dtype=torch.float32)
+            )
+            class_ids_t = (
+                torch.tensor(class_ids, dtype=torch.long)
+                if class_ids
+                else torch.zeros((0,), dtype=torch.long)
+            )
 
             records.append(
                 {
                     "image_path": img_path,
                     "boxes_abs": boxes_t,
-                    "class_ids_raw": class_ids_raw,
+                    "class_ids": class_ids_t,
+                    "text_entries": [],
                 }
             )
 
         if missing_images > 0:
             print(
-                f"Warning: {missing_images} images from {annotations_path} were not found on disk and were skipped."
+                f"Warning: {missing_images} images from {annotations_path} "
+                "were not found on disk and were skipped."
             )
 
         if len(records) == 0:
             raise RuntimeError(f"No usable records found in JSON annotations: {annotations_path}")
 
-        return records, categories_by_id
+        return records, class_map, num_classes
+
+    @staticmethod
+    def _extract_structured_box(annotation: Dict[str, Any]) -> Optional[List[float]]:
+        box = annotation.get("bounding_box_normalized")
+        if isinstance(box, dict):
+            x_center = box.get("x_center", box.get("cx"))
+            y_center = box.get("y_center", box.get("cy"))
+            width = box.get("width", box.get("w"))
+            height = box.get("height", box.get("h"))
+            values = [x_center, y_center, width, height]
+        else:
+            box = annotation.get("bbox_normalized", annotation.get("bbox"))
+            if not isinstance(box, (list, tuple)) or len(box) < 4:
+                return None
+            values = list(box[:4])
+
+        try:
+            x_center, y_center, width, height = [float(v) for v in values]
+        except Exception:
+            return None
+
+        if width <= 0.0 or height <= 0.0:
+            return None
+
+        return [
+            max(0.0, min(1.0, x_center)),
+            max(0.0, min(1.0, y_center)),
+            max(0.0, min(1.0, width)),
+            max(0.0, min(1.0, height)),
+        ]
+
+    def _load_structured_records(self, annotations_path: Path):
+        with open(annotations_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+
+        if not isinstance(data, dict):
+            raise ValueError(f"Unsupported JSON schema in {annotations_path}")
+
+        images = data.get("images", [])
+        if not isinstance(images, list):
+            raise ValueError(f"Structured JSON missing 'images' list: {annotations_path}")
+
+        generated_ids: Dict[str, int] = {}
+        next_generated_id = 0
+        discovered_categories: Dict[int, str] = {}
+
+        def resolve_category(annotation: Dict[str, Any]) -> Tuple[int, str]:
+            nonlocal next_generated_id
+            raw_name = str(annotation.get("category_name", "")).strip()
+            raw_id = annotation.get("category_id")
+
+            if raw_id is not None:
+                raw_cat_id = int(raw_id)
+            else:
+                key = raw_name or f"class_{next_generated_id}"
+                if key not in generated_ids:
+                    generated_ids[key] = next_generated_id
+                    next_generated_id += 1
+                raw_cat_id = generated_ids[key]
+
+            raw_cat_name = raw_name or discovered_categories.get(raw_cat_id, f"class_{raw_cat_id}")
+            discovered_categories.setdefault(raw_cat_id, raw_cat_name)
+            return raw_cat_id, raw_cat_name
+
+        for image in images:
+            annotations = image.get("annotations", [])
+            if not isinstance(annotations, list):
+                continue
+            for annotation in annotations:
+                if not isinstance(annotation, dict):
+                    continue
+                resolve_category(annotation)
+
+        raw_to_contig, class_map, num_classes = self._build_category_mapping(discovered_categories)
+        records = []
+        missing_images = 0
+
+        for image in images:
+            if not isinstance(image, dict):
+                continue
+            file_name = image.get("file_name")
+            if not file_name:
+                continue
+
+            image_split = image.get("split", self.split)
+            image_path = self._resolve_image_path(str(file_name), split_name=str(image_split))
+            if image_path is None:
+                missing_images += 1
+                continue
+
+            boxes_rel: List[List[float]] = []
+            class_ids: List[int] = []
+            text_entries: List[Dict[str, str]] = []
+
+            annotations = image.get("annotations", [])
+            if not isinstance(annotations, list):
+                annotations = []
+
+            for annotation in annotations:
+                if not isinstance(annotation, dict):
+                    continue
+
+                raw_cat_id, raw_cat_name = resolve_category(annotation)
+                box_rel = self._extract_structured_box(annotation)
+                if box_rel is None:
+                    continue
+
+                boxes_rel.append(box_rel)
+                class_ids.append(raw_to_contig.get(raw_cat_id, 0))
+                text_entries.append(
+                    {
+                        "category_name": raw_cat_name,
+                        "severity": str(
+                            (annotation.get("risk_assessment") or {}).get("severity_level", "")
+                        ).strip(),
+                        "zone": str(annotation.get("zone_estimation", "")).strip(),
+                        "description": str(annotation.get("description", "")).strip(),
+                    }
+                )
+
+            records.append(
+                {
+                    "image_path": image_path,
+                    "boxes_rel": (
+                        torch.tensor(boxes_rel, dtype=torch.float32)
+                        if boxes_rel
+                        else torch.zeros((0, 4), dtype=torch.float32)
+                    ),
+                    "class_ids": (
+                        torch.tensor(class_ids, dtype=torch.long)
+                        if class_ids
+                        else torch.zeros((0,), dtype=torch.long)
+                    ),
+                    "text_entries": text_entries,
+                }
+            )
+
+        if missing_images > 0:
+            print(
+                f"Warning: {missing_images} images from {annotations_path} "
+                "were not found on disk and were skipped."
+            )
+
+        if len(records) == 0:
+            raise RuntimeError(f"No usable records found in JSON annotations: {annotations_path}")
+
+        return records, class_map, num_classes
 
     def __len__(self):
         if self.annotation_format == "yolo":
@@ -281,7 +540,7 @@ class YOLODataset(Dataset):
     def _read_coco_labels(self, record, image_size: Tuple[int, int]) -> Tuple[torch.Tensor, torch.Tensor]:
         img_w, img_h = image_size
         boxes_abs = record["boxes_abs"]
-        raw_ids = record["class_ids_raw"]
+        class_ids = record["class_ids"]
 
         if boxes_abs.numel() == 0:
             return torch.zeros((0, 4), dtype=torch.float32), torch.zeros((0,), dtype=torch.long)
@@ -296,19 +555,90 @@ class YOLODataset(Dataset):
         ww = w / float(img_w)
         hh = h / float(img_h)
         boxes_rel = torch.stack([cx, cy, ww, hh], dim=-1).clamp(0.0, 1.0)
-
-        class_ids = torch.tensor(
-            [self.cat_id_to_contig.get(int(cid), 0) for cid in raw_ids],
-            dtype=torch.long,
-        )
         return boxes_rel, class_ids
+
+    @staticmethod
+    def _format_damage_name(name: str) -> str:
+        return re.sub(r"\s+", " ", str(name).replace("-", " ").strip()).lower()
+
+    @staticmethod
+    def _normalize_caption_text(text: str) -> str:
+        compact = re.sub(r"\s+", " ", str(text).strip())
+        compact = compact.rstrip(" .")
+        return compact.lower()
+
+    def _structured_caption_from_entry(self, entry: Dict[str, str]) -> str:
+        damage = self._format_damage_name(entry.get("category_name", "damage"))
+        severity = self._normalize_caption_text(entry.get("severity", "")) if entry.get("severity") else ""
+        zone = self._normalize_caption_text(entry.get("zone", "")) if entry.get("zone") else ""
+
+        parts = [part for part in (severity, damage) if part]
+        damage_phrase = " ".join(parts).strip() or damage or "damage"
+        if zone:
+            return f"{damage_phrase} detected in the {zone} structural region"
+        return f"{damage_phrase} detected on aircraft structure"
+
+    def _entry_to_caption(self, entry: Dict[str, str]) -> str:
+        description = str(entry.get("description", "")).strip()
+
+        if self.caption_style == "synthetic":
+            return ""
+        if self.caption_style == "raw_description":
+            if description:
+                return self._normalize_caption_text(description)
+            return self._structured_caption_from_entry(entry)
+        if self.caption_style in ("auto", "first_sentence"):
+            if description:
+                first_sentence = description.split(".", 1)[0]
+                first_sentence = self._normalize_caption_text(first_sentence)
+                if first_sentence:
+                    return first_sentence
+            return self._structured_caption_from_entry(entry)
+        if self.caption_style == "structured":
+            return self._structured_caption_from_entry(entry)
+        return self._structured_caption_from_entry(entry)
 
     def _synthesize_caption(self, class_ids: torch.Tensor) -> str:
         if class_ids.numel() == 0:
-            return "a photo"
-        cls0 = int(class_ids[0].item())
-        name = self.class_map.get(cls0, f"class_{cls0}")
-        return f"a photo of a {name}"
+            return "a photo of aircraft surface"
+
+        names = []
+        seen = set()
+        for cls_id in class_ids.tolist():
+            name = self._format_damage_name(self.class_map.get(int(cls_id), f"class_{cls_id}"))
+            if name and name not in seen:
+                seen.add(name)
+                names.append(name)
+
+        if len(names) == 0:
+            return "a photo of aircraft surface"
+        if len(names) == 1:
+            return f"a photo of a {names[0]}"
+        if len(names) == 2:
+            return f"a photo of {names[0]} and {names[1]}"
+        return f"a photo of {', '.join(names[:-1])}, and {names[-1]}"
+
+    def _compose_caption(self, record: Optional[Dict[str, Any]], class_ids: torch.Tensor) -> str:
+        if record is None or self.caption_style == "synthetic":
+            return self._synthesize_caption(class_ids)
+
+        text_entries = record.get("text_entries", [])
+        if not text_entries:
+            return self._synthesize_caption(class_ids)
+
+        captions: List[str] = []
+        seen = set()
+        for entry in text_entries:
+            caption = self._entry_to_caption(entry)
+            if not caption or caption in seen:
+                continue
+            seen.add(caption)
+            captions.append(caption)
+
+        if not captions:
+            return self._synthesize_caption(class_ids)
+
+        return "; ".join(captions[: self.max_caption_annotations])
 
     @staticmethod
     def _boxes_cxcywh_to_xyxy_abs(boxes_rel: torch.Tensor, img_w: int, img_h: int) -> torch.Tensor:
@@ -416,22 +746,29 @@ class YOLODataset(Dataset):
         return img_aug, boxes_aug, class_ids_aug
 
     def __getitem__(self, idx: int):
+        record = None
         if self.annotation_format == "yolo":
             img_path = self.files[idx]
             label_path = self.labels_dir / (img_path.stem + ".txt")
             img = Image.open(img_path).convert("RGB")
             boxes_rel, class_ids = self._read_yolo_labels(label_path)
-        else:
+        elif self.annotation_format == "coco_json":
             record = self.records[idx]
             img_path = record["image_path"]
             img = Image.open(img_path).convert("RGB")
             boxes_rel, class_ids = self._read_coco_labels(record, img.size)
+        else:
+            record = self.records[idx]
+            img_path = record["image_path"]
+            img = Image.open(img_path).convert("RGB")
+            boxes_rel = record["boxes_rel"]
+            class_ids = record["class_ids"]
 
         if self.augment and self._use_default_transform:
             img, boxes_rel, class_ids = self._apply_train_augment(img, boxes_rel, class_ids)
 
         img_t = self.transform(img)
-        caption = self._synthesize_caption(class_ids)
+        caption = self._compose_caption(record, class_ids)
 
         if self.tokenizer is not None:
             token_ids = self.tokenizer.encode([caption])[0]

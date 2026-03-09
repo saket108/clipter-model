@@ -22,6 +22,23 @@ from losses.contrastive_loss import ContrastiveLoss
 cfg = Config()
 
 
+def resolve_device(device_arg: str | None) -> torch.device:
+    requested = (device_arg or "").strip().lower()
+
+    if not requested or requested == "auto":
+        return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if requested == "cpu":
+        return torch.device("cpu")
+    if requested == "cuda":
+        if not torch.cuda.is_available():
+            raise RuntimeError(
+                "Requested --device cuda but CUDA is not available. "
+                "Use --device cpu or run on a CUDA-enabled setup."
+            )
+        return torch.device("cuda")
+    raise ValueError(f"Unsupported device option: {device_arg!r}")
+
+
 class DummyCaptionDataset(Dataset):
     """Fake dataset: returns (image, token_ids) — uses `SimpleTokenizer` if available.
 
@@ -177,14 +194,16 @@ def _resolve_annotation_file(root: Path, candidates):
     return None
 
 
-def train(fast: bool = False, subset: int | None = None):
+def train(fast: bool = False, subset: int | None = None, device_override: str | None = None):
     """Train the CLIP backbone.
 
     fast: if True, run a short CPU-friendly training (fewer epochs, smaller batch, limited samples).
     subset: optional int to limit number of training samples (useful for quick local runs).
     """
     set_seed(cfg.seed)
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    requested_device = device_override if device_override is not None else getattr(cfg, "device", None)
+    device = resolve_device(requested_device)
+    print(f"Using device: {device}")
 
     # local overrides for quick/debug runs
     epochs = 2 if fast else cfg.epochs
@@ -264,6 +283,7 @@ def train(fast: bool = False, subset: int | None = None):
                 tokenizer=tokenizer,
                 annotation_format=cfg.annotation_format,
                 annotations_file=train_annotations,
+                caption_style=getattr(cfg, "caption_style", "auto"),
             )
 
             val_dataset = None
@@ -277,6 +297,7 @@ def train(fast: bool = False, subset: int | None = None):
                     tokenizer=tokenizer,
                     annotation_format=cfg.annotation_format,
                     annotations_file=val_annotations,
+                    caption_style=getattr(cfg, "caption_style", "auto"),
                 )
 
             print(
@@ -291,6 +312,7 @@ def train(fast: bool = False, subset: int | None = None):
                     else ""
                 )
             )
+            print(f"Caption style: {getattr(cfg, 'caption_style', 'auto')}")
         except Exception as e:
             print("Failed to load YOLODataset — falling back to DummyCaptionDataset:", e)
             dataset = DummyCaptionDataset(num_samples=2048)
@@ -307,12 +329,20 @@ def train(fast: bool = False, subset: int | None = None):
         subset = min(subset, len(dataset))
         dataset = Subset(dataset, list(range(subset)))
 
+    dataloader_workers = max(0, int(cfg.num_workers))
+    if device.type != "cuda":
+        dataloader_workers = 0
+    pin_memory = device.type == "cuda"
+    print(
+        f"DataLoader opts: num_workers={dataloader_workers}, pin_memory={pin_memory}"
+    )
+
     dl = DataLoader(
         dataset,
         batch_size=batch_size,
         shuffle=True,
-        num_workers=cfg.num_workers,
-        pin_memory=True,
+        num_workers=dataloader_workers,
+        pin_memory=pin_memory,
         collate_fn=clip_collate_fn,
     )
     val_dl = (
@@ -320,8 +350,8 @@ def train(fast: bool = False, subset: int | None = None):
             val_dataset,
             batch_size=batch_size,
             shuffle=False,
-            num_workers=cfg.num_workers,
-            pin_memory=True,
+            num_workers=dataloader_workers,
+            pin_memory=pin_memory,
             collate_fn=clip_collate_fn,
         )
         if val_dataset is not None
@@ -444,10 +474,104 @@ def train(fast: bool = False, subset: int | None = None):
     print(f"Training complete — model saved to {final_name}")
 
 
+def apply_cli_overrides(args):
+    if args.data_root is not None:
+        cfg.data_root = args.data_root
+    if args.data_yaml is not None:
+        cfg.data_yaml = args.data_yaml
+    if args.classes_path is not None:
+        cfg.classes_path = args.classes_path
+    if args.train_split is not None:
+        cfg.train_split = args.train_split
+    if args.val_split is not None:
+        cfg.val_split = args.val_split
+    if args.annotation_format is not None:
+        cfg.annotation_format = args.annotation_format
+    if args.caption_style is not None:
+        cfg.caption_style = args.caption_style
+    if args.image_size is not None:
+        cfg.image_size = args.image_size
+    if args.max_text_len is not None:
+        cfg.max_text_len = args.max_text_len
+    if args.embed_dim is not None:
+        cfg.embed_dim = args.embed_dim
+    if args.proj_dim is not None:
+        cfg.proj_dim = args.proj_dim
+    if args.vocab_size is not None:
+        cfg.vocab_size = args.vocab_size
+    if args.image_backbone is not None:
+        cfg.image_backbone = args.image_backbone
+    if args.image_pretrained:
+        cfg.image_pretrained = True
+    elif args.no_image_pretrained:
+        cfg.image_pretrained = False
+    if args.seed is not None:
+        cfg.seed = args.seed
+    if args.epochs is not None:
+        cfg.epochs = args.epochs
+    if args.batch_size is not None:
+        cfg.batch_size = args.batch_size
+    if args.lr is not None:
+        cfg.lr = args.lr
+    if args.weight_decay is not None:
+        cfg.weight_decay = args.weight_decay
+    if args.num_workers is not None:
+        cfg.num_workers = args.num_workers
+    if args.device is not None:
+        cfg.device = args.device
+
+
 if __name__ == '__main__':
     import argparse
+
     p = argparse.ArgumentParser()
     p.add_argument('--fast', action='store_true', help='run a small quick training (CPU-friendly)')
     p.add_argument('--subset', type=int, default=None, help='limit number of training samples (useful for quick local runs)')
+    p.add_argument('--data-root', type=str, default=None, help='override cfg.data_root')
+    p.add_argument('--data-yaml', type=str, default=None, help='override cfg.data_yaml')
+    p.add_argument('--classes-path', type=str, default=None, help='override cfg.classes_path')
+    p.add_argument('--train-split', type=str, default=None, help='override cfg.train_split')
+    p.add_argument('--val-split', type=str, default=None, help='override cfg.val_split')
+    p.add_argument(
+        '--annotation-format',
+        type=str,
+        choices=['auto', 'yolo', 'coco_json', 'structured_json'],
+        default=None,
+        help='override cfg.annotation_format',
+    )
+    p.add_argument(
+        '--caption-style',
+        type=str,
+        choices=['auto', 'synthetic', 'structured', 'first_sentence', 'raw_description'],
+        default=None,
+        help='choose how image captions are derived from JSON annotations',
+    )
+    p.add_argument('--image-size', type=int, default=None)
+    p.add_argument('--max-text-len', type=int, default=None)
+    p.add_argument('--embed-dim', type=int, default=None)
+    p.add_argument('--proj-dim', type=int, default=None)
+    p.add_argument('--vocab-size', type=int, default=None)
+    p.add_argument(
+        '--image-backbone',
+        type=str,
+        choices=['mobilenet_v3_small', 'convnext_tiny'],
+        default=None,
+    )
+    p.add_argument('--image-pretrained', action='store_true')
+    p.add_argument('--no-image-pretrained', action='store_true')
+    p.add_argument('--seed', type=int, default=None)
+    p.add_argument('--epochs', type=int, default=None)
+    p.add_argument('--batch-size', type=int, default=None)
+    p.add_argument('--lr', type=float, default=None)
+    p.add_argument('--weight-decay', type=float, default=None)
+    p.add_argument('--num-workers', type=int, default=None)
+    p.add_argument(
+        '--device',
+        type=str,
+        choices=['auto', 'cpu', 'cuda'],
+        default=None,
+        help='force training device (default: auto-detect)',
+    )
     args = p.parse_args()
-    train(fast=args.fast, subset=args.subset)
+    apply_cli_overrides(args)
+    train(fast=args.fast, subset=args.subset, device_override=args.device)

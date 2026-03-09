@@ -26,13 +26,21 @@ class ImageEncoder(nn.Module):
         super(ImageEncoder, self).__init__()
 
         if backbone_name == "convnext_tiny":
-            weights = ConvNeXt_Tiny_Weights.DEFAULT if pretrained else None
-            backbone = convnext_tiny(weights=weights)
+            backbone = self._load_backbone(
+                builder=convnext_tiny,
+                default_weights=ConvNeXt_Tiny_Weights.DEFAULT,
+                pretrained=pretrained,
+                backbone_name=backbone_name,
+            )
             self.features = backbone.features
             self.backbone_out_dim = 768
         elif backbone_name == "mobilenet_v3_small":
-            weights = MobileNet_V3_Small_Weights.DEFAULT if pretrained else None
-            backbone = mobilenet_v3_small(weights=weights)
+            backbone = self._load_backbone(
+                builder=mobilenet_v3_small,
+                default_weights=MobileNet_V3_Small_Weights.DEFAULT,
+                pretrained=pretrained,
+                backbone_name=backbone_name,
+            )
             self.features = backbone.features
             self.backbone_out_dim = 576
         else:
@@ -64,6 +72,20 @@ class ImageEncoder(nn.Module):
                 ]
             )
             self.level_embed = nn.Parameter(torch.zeros(len(self.multiscale_specs), self.output_dim))
+
+    @staticmethod
+    def _load_backbone(builder, default_weights, pretrained: bool, backbone_name: str):
+        weights = default_weights if pretrained else None
+        try:
+            return builder(weights=weights)
+        except Exception as e:
+            if not pretrained:
+                raise
+            print(
+                f"Warning: failed to load pretrained weights for {backbone_name}: {e}. "
+                "Falling back to random initialization."
+            )
+            return builder(weights=None)
 
     def get_stage_specs(self, levels: int | None = None):
         available = list(self._STAGE_SPECS[self.backbone_name])

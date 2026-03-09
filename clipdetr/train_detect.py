@@ -451,12 +451,20 @@ def train(
         subset = min(subset, len(train_ds))
         train_ds = Subset(train_ds, list(range(subset)))
 
+    dataloader_workers = max(0, int(cfg.num_workers))
+    if device.type != "cuda":
+        dataloader_workers = 0
+    pin_memory = device.type == "cuda"
+    print(
+        f"DataLoader opts: num_workers={dataloader_workers}, pin_memory={pin_memory}"
+    )
+
     train_dl = DataLoader(
         train_ds,
         batch_size=batch_size,
         shuffle=True,
-        num_workers=cfg.num_workers,
-        pin_memory=True,
+        num_workers=dataloader_workers,
+        pin_memory=pin_memory,
         collate_fn=detection_collate_fn,
     )
     val_dl = (
@@ -464,8 +472,8 @@ def train(
             val_ds,
             batch_size=batch_size,
             shuffle=False,
-            num_workers=cfg.num_workers,
-            pin_memory=True,
+            num_workers=dataloader_workers,
+            pin_memory=pin_memory,
             collate_fn=detection_collate_fn,
         )
         if val_ds is not None

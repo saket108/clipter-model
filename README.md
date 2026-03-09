@@ -86,6 +86,22 @@ dataset_root/
 
 The split names can differ if `data.yaml` points to them correctly.
 
+CLIPTER also supports a structured per-image JSON file such as `train.json`,
+`valid.json`, and `test.json` alongside the YOLO split folders. In `auto`
+mode:
+
+- detector training prefers YOLO `labels/*.txt` when they are present
+- CLIP pretraining prefers the structured JSON so it can use annotation
+  descriptions, severity, and zone text as captions
+
+Supported caption styles for `clipdetr/train_clip.py` are:
+
+- `auto`: first sentence from each annotation description, else a structured fallback
+- `structured`: synthesized captions such as `moderate crack detected in the central structural region`
+- `first_sentence`: explicit first-sentence extraction from descriptions
+- `raw_description`: full annotation descriptions
+- `synthetic`: class-name-only captions
+
 Before long training runs, audit the dataset:
 
 ```powershell
@@ -177,6 +193,33 @@ python clipdetr/train_detect.py `
   --strict-class-check `
   --tag strong_recipe_v1
 ```
+
+### 4. Two-stage CLIPTER workflow
+
+Use this when the dataset includes structured JSON descriptions and you want
+CLIP-init before detector fine-tuning.
+
+```powershell
+python clipdetr/train_clip.py `
+  --data-root "C:\path\to\dataset_root" `
+  --data-yaml data.yaml `
+  --caption-style auto `
+  --device auto `
+  --epochs 20 `
+  --batch-size 16
+
+python scripts/train_from_data_yaml.py `
+  --data "C:\path\to\dataset_root\data.yaml" `
+  --device auto `
+  --epochs 80 `
+  --batch-size 8 `
+  --tag clip_init_recipe_v1
+```
+
+If torchvision pretrained weights are unavailable, CLIPTER now falls back to
+random backbone initialization instead of aborting. On CPU runs, the training
+entrypoints also force `num_workers=0` to avoid fragile multiprocessing failures
+on restricted Windows setups.
 
 ## Evaluation and Threshold Tuning
 
