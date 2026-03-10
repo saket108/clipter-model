@@ -206,9 +206,9 @@ class DetectionLoss(nn.Module):
                 )
                 # Also add background loss for unmatched queries
                 bg_logits = src_logits[:, :, -1]  # [B, Q]
-                bg_targets = torch.full((bs, num_queries), self.num_classes, 
+                bg_targets = torch.full((bs * num_queries,), self.num_classes, 
                                        dtype=torch.int64, device=src_logits.device)
-                bg_loss = F.cross_entropy(bg_logits, bg_targets, weight=self.empty_weight)
+                bg_loss = F.cross_entropy(bg_logits.view(-1, self.num_classes + 1), bg_targets, weight=self.empty_weight)
                 loss_ce = loss_ce + 0.1 * bg_loss
             else:
                 loss_ce = F.cross_entropy(src_logits[:, :, -1], target_classes[:, 0])
