@@ -193,7 +193,7 @@ class DetectionLoss(nn.Module):
 
         # Use focal loss if enabled
         if self.use_focal_loss and self.focal_loss is not None:
-            # Flatten for focal loss: [B*Q, C+1] -> [B*Q, C+1], [B*Q] -> [B*Q]
+            # Flatten for focal loss
             src_logits_flat = src_logits.view(-1, self.num_classes + 1)
             target_classes_flat = target_classes.view(-1)
             
@@ -204,14 +204,13 @@ class DetectionLoss(nn.Module):
                     src_logits_flat[matched_mask],
                     target_classes_flat[matched_mask]
                 )
-                # Also add background loss for unmatched queries
-                bg_logits = src_logits[:, :, -1]  # [B, Q]
-                bg_targets = torch.full((bs * num_queries,), self.num_classes, 
-                                       dtype=torch.int64, device=src_logits.device)
-                bg_loss = F.cross_entropy(bg_logits.view(-1, self.num_classes + 1), bg_targets, weight=self.empty_weight)
-                loss_ce = loss_ce + 0.1 * bg_loss
             else:
-                loss_ce = F.cross_entropy(src_logits[:, :, -1], target_classes[:, 0])
+                # All queries are unmatched - use background class
+                # Don't use weight to avoid dimension mismatch
+                bg_logits = src_logits[:, :, -1]  # [B, Q]
+                bg_targets = torch.full((bs, num_queries), self.num_classes, 
+                                      dtype=torch.int64, device=src_logits.device)
+                loss_ce = F.cross_entropy(bg_logits, bg_targets)
         else:
             loss_ce = F.cross_entropy(
                 src_logits.transpose(1, 2),
@@ -258,3 +257,4 @@ class DetectionLoss(nn.Module):
         )
         losses["loss_total"] = loss_total
         return losses
+
