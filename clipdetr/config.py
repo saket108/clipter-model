@@ -45,18 +45,21 @@ class Config:
     train_augment: bool = True                          # apply train-only photometric augmentation
 
     # lightweight DETR settings (for real detection training)
-    det_num_queries: int = 50
-    det_decoder_layers: int = 2
+    det_num_queries: int = 100          # Increased from 50 for better detection
+    det_decoder_layers: int = 6        # Increased from 2 for better feature learning
     det_num_heads: int = 8
     det_ff_dim: int = 512
     det_dropout: float = 0.1
     det_use_multiscale_memory: bool = False
     det_use_multiscale_neck: bool = False
     det_multiscale_levels: int = 3
-    det_cls_loss_coef: float = 1.0
+    det_cls_loss_coef: float = 2.0     # Increased from 1.0 for better classification
     det_bbox_loss_coef: float = 5.0
     det_giou_loss_coef: float = 2.0
-    det_eos_coef: float = 0.1
+    det_eos_coef: float = 0.3           # Increased from 0.1 to handle class imbalance
+    det_use_focal_loss: bool = True     # NEW: Use focal loss for better classification
+    det_focal_alpha: float = 0.25       # NEW: Focal loss alpha parameter
+    det_focal_gamma: float = 2.0        # NEW: Focal loss gamma parameter
 
     # optional bridge from CLIP pretraining to detection
     clip_init_checkpoint: str | None = None            # e.g. "clip_backbone.pth" or checkpoints/...pth

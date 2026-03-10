@@ -52,6 +52,25 @@ def generalized_box_iou(boxes1: torch.Tensor, boxes2: torch.Tensor) -> torch.Ten
     return iou - (area - union) / area.clamp(min=1e-6)
 
 
+class FocalLoss(nn.Module):
+    """Focal Loss for better handling of class imbalance."""
+    def __init__(self, alpha: float = 0.25, gamma: float = 2.0):
+        super().__init__()
+        self.alpha = alpha
+        self.gamma = gamma
+
+    def forward(self, inputs: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            inputs: [B, C] logits
+            targets: [B] class indices
+        """
+        ce_loss = F.cross_entropy(inputs, targets, reduction='none')
+        pt = torch.exp(-ce_loss)
+        focal_loss = self.alpha * (1 - pt) ** self.gamma * ce_loss
+        return focal_loss.mean()
+
+
 class HungarianMatcher(nn.Module):
     def __init__(self, cost_class: float = 1.0, cost_bbox: float = 5.0, cost_giou: float = 2.0):
         super().__init__()
@@ -135,6 +154,9 @@ class DetectionLoss(nn.Module):
         bbox_loss_coef: float = 5.0,
         giou_loss_coef: float = 2.0,
         eos_coef: float = 0.1,
+        use_focal_loss: bool = False,
+        focal_alpha: float = 0.25,
+        focal_gamma: float = 2.0,
     ):
         super().__init__()
         self.num_classes = num_classes
@@ -142,10 +164,17 @@ class DetectionLoss(nn.Module):
         self.cls_loss_coef = cls_loss_coef
         self.bbox_loss_coef = bbox_loss_coef
         self.giou_loss_coef = giou_loss_coef
+        self.use_focal_loss = use_focal_loss
 
         empty_weight = torch.ones(num_classes + 1)
         empty_weight[-1] = eos_coef
         self.register_buffer("empty_weight", empty_weight)
+        
+        # Focal loss for classification
+        if use_focal_loss:
+            self.focal_loss = FocalLoss(alpha=focal_alpha, gamma=focal_gamma)
+        else:
+            self.focal_loss = None
 
     def loss_labels(self, outputs, targets, indices):
         src_logits = outputs["pred_logits"]
@@ -162,11 +191,33 @@ class DetectionLoss(nn.Module):
                 continue
             target_classes[b, src_idx] = targets[b]["labels"][tgt_idx]
 
-        loss_ce = F.cross_entropy(
-            src_logits.transpose(1, 2),
-            target_classes,
-            weight=self.empty_weight.to(src_logits.device),
-        )
+        # Use focal loss if enabled
+        if self.use_focal_loss and self.focal_loss is not None:
+            # Flatten for focal loss: [B*Q, C+1] -> [B*Q, C+1], [B*Q] -> [B*Q]
+            src_logits_flat = src_logits.view(-1, self.num_classes + 1)
+            target_classes_flat = target_classes.view(-1)
+            
+            # Only compute loss on matched positions (non-no-object)
+            matched_mask = target_classes_flat != self.num_classes
+            if matched_mask.any():
+                loss_ce = self.focal_loss(
+                    src_logits_flat[matched_mask],
+                    target_classes_flat[matched_mask]
+                )
+                # Also add background loss for unmatched queries
+                bg_logits = src_logits[:, :, -1]  # [B, Q]
+                bg_targets = torch.full((bs, num_queries), self.num_classes, 
+                                       dtype=torch.int64, device=src_logits.device)
+                bg_loss = F.cross_entropy(bg_logits, bg_targets, weight=self.empty_weight)
+                loss_ce = loss_ce + 0.1 * bg_loss
+            else:
+                loss_ce = F.cross_entropy(src_logits[:, :, -1], target_classes[:, 0])
+        else:
+            loss_ce = F.cross_entropy(
+                src_logits.transpose(1, 2),
+                target_classes,
+                weight=self.empty_weight.to(src_logits.device),
+            )
         return {"loss_ce": loss_ce}
 
     def loss_boxes(self, outputs, targets, indices):

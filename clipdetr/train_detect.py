@@ -611,6 +611,9 @@ def train(
         bbox_loss_coef=cfg.det_bbox_loss_coef,
         giou_loss_coef=cfg.det_giou_loss_coef,
         eos_coef=cfg.det_eos_coef,
+        use_focal_loss=cfg.det_use_focal_loss,
+        focal_alpha=cfg.det_focal_alpha,
+        focal_gamma=cfg.det_focal_gamma,
     ).to(device)
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay)
