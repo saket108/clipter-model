@@ -13,13 +13,13 @@ import torch
 from torch.utils.data import DataLoader, Dataset, Subset
 from tqdm import tqdm
 
-from config import Config
-from datasets.yolo_dataset import YOLODataset
-from losses.detection_loss import DetectionLoss
-from models.light_detr import LightDETR
-from utils.dataset_stats import compute_class_distribution
-from utils.detection_metrics import evaluate_model_map
-from utils.experiment_logger import ExperimentLogger, make_run_id
+from clipdetr.config import Config
+from clipdetr.datasets.yolo_dataset import YOLODataset
+from clipdetr.losses.detection_loss import DetectionLoss
+from clipdetr.models.light_detr import LightDETR
+from clipdetr.utils.dataset_stats import compute_class_distribution
+from clipdetr.utils.detection_metrics import evaluate_model_map
+from clipdetr.utils.experiment_logger import ExperimentLogger, make_run_id
 
 
 cfg = Config()

@@ -1,0 +1,1 @@
+fix: Improve detection training with architectural and loss improvements  
